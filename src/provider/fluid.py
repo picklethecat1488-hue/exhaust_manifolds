@@ -3377,9 +3377,19 @@ class Fluid:
         if not hasattr(self, "fluid_body_tracker"):
             self.fluid_body_tracker = FluidBodyTracker(r_s=self.r_s)
 
+        pos = (
+            np.asarray(self.last_positions, dtype=np.float32)
+            if self.last_positions is not None
+            else np.zeros((0, 3), dtype=np.float32)
+        )
+        vel = (
+            np.asarray(self.last_velocities, dtype=np.float32)
+            if self.last_velocities is not None
+            else np.zeros_like(pos)
+        )
         return self.fluid_body_tracker.update_bodies(
-            self.last_positions,
-            self.last_velocities,
+            pos,
+            vel,
             cad_context=self.processed_boundaries.fluid_context,
         )
 
