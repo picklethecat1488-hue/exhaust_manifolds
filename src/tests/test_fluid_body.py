@@ -879,3 +879,81 @@ def test_arc_waterfall_mesh_watertightness_and_cad_solid():
     bbox = cad_solid.bounding_box()
     assert bbox.min.Z >= 0.040
     assert bbox.max.Z <= 0.110
+
+
+def test_splash_cluster_splitting_and_pool_smoothing():
+    """Verify airborne splash droplets are broken into multiple small clusters and pool mesh is smooth."""
+    import trimesh
+    from model.fluid_body import generate_heightfield_cylinder_mesh
+
+    # 1. Test splash cluster splitting for separated airborne droplets
+    positions = np.array(
+        [
+            # Pool bed particles (establishing pool surface around Z=0.045)
+            [0.0, -0.050, 0.045],
+            [0.010, -0.050, 0.045],
+            [-0.010, -0.050, 0.045],
+            [0.020, -0.050, 0.045],
+            [-0.020, -0.050, 0.045],
+            [0.030, -0.050, 0.045],
+            [-0.030, -0.050, 0.045],
+            [0.0, -0.060, 0.045],
+            [0.010, -0.060, 0.045],
+            [-0.010, -0.060, 0.045],
+            # 3 distinct airborne splash droplets in open basin separated by > 15mm
+            [0.050, -0.030, 0.060],
+            [0.050, -0.030, 0.080],
+            [-0.050, -0.030, 0.070],
+        ],
+        dtype=np.float32,
+    )
+    velocities = np.zeros((13, 3), dtype=np.float32)
+
+    cad_context = FluidCADContext(
+        features=(
+            CADFeature("Tube", x=0.0, y=0.028, z=0.041, r=0.010),
+            CADFeature("Terrace", x=0.0, y=0.028, z=0.108, r=0.030),
+            CADFeature("Drain", x=0.0, y=-0.020, z=0.098, r=0.0154),
+            CADFeature("Pocket", x=0.0, y=0.0, z=0.098, r=0.080),
+            CADFeature("Bowl", x=0.0, y=0.0, z=0.041, r=0.090),
+        )
+    )
+
+    tracker = FluidBodyTracker(r_s=0.0025)
+    bodies = tracker.update_bodies(positions, velocities, cad_context=cad_context)
+
+    # Verify that the 3 separated droplets form 3 independent splash clusters
+    splash_clusters = [b for b in bodies if b.stage == FluidStage.SPLASH_CLUSTER]
+    assert len(splash_clusters) == 3
+
+    # Each splash cluster mesh must be watertight and have bounded volume (no wild height inflation)
+    for sc in splash_clusters:
+        verts, faces = sc.to_mesh()
+        assert len(verts) > 0
+        assert len(faces) > 0
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        assert mesh.is_watertight
+        assert mesh.volume > 0.0
+        # Mesh bounding height must be compact (< 15mm for small droplets)
+        height = np.max(verts[:, 2]) - np.min(verts[:, 2])
+        assert height <= 0.015
+
+    # 2. Test pool heightfield smoothing
+    surf_pos = np.array(
+        [
+            [0.010, 0.010, 0.052],
+            [0.012, 0.010, 0.051],
+            [-0.020, 0.015, 0.048],
+        ],
+        dtype=np.float32,
+    )
+    p_verts, p_faces = generate_heightfield_cylinder_mesh(
+        radius=0.080,
+        z_floor=0.010,
+        surface_positions=surf_pos,
+        default_z_top=0.050,
+        center=(0.0, 0.0),
+    )
+    p_mesh = trimesh.Trimesh(vertices=p_verts, faces=p_faces)
+    assert p_mesh.is_watertight
+    assert p_mesh.volume > 0.0

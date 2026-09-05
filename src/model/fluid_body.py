@@ -127,24 +127,70 @@ def generate_heightfield_cylinder_mesh(
     dx = max(1e-4, (x_max - x_min) / nx)
     dy = max(1e-4, (y_max - y_min) / ny)
     grid_z = np.full((nx, ny), default_z_top, dtype=np.float32)
+    grid_count = np.zeros((nx, ny), dtype=np.float32)
+    grid_sum_z = np.zeros((nx, ny), dtype=np.float32)
 
     if surface_positions is not None and len(surface_positions) > 0:
         d_center_sq = (surface_positions[:, 0] - cx) ** 2 + (surface_positions[:, 1] - cy) ** 2
         in_bounds = (
             (d_center_sq <= (radius + 1e-4) ** 2)
             & (surface_positions[:, 2] >= z_floor)
-            & (surface_positions[:, 2] <= default_z_top + 0.010)
+            & (surface_positions[:, 2] <= default_z_top + 0.015)
         )
         valid_pos = surface_positions[in_bounds]
         if len(valid_pos) > 0:
             ix = np.clip(np.floor((valid_pos[:, 0] - x_min) / dx).astype(int), 0, nx - 1)
             iy = np.clip(np.floor((valid_pos[:, 1] - y_min) / dy).astype(int), 0, ny - 1)
-            np.maximum.at(grid_z, (ix, iy), valid_pos[:, 2])
+            np.add.at(grid_count, (ix, iy), 1.0)
+            np.add.at(grid_sum_z, (ix, iy), valid_pos[:, 2])
+
+            has_samples = grid_count > 0.0
+            grid_z = np.where(has_samples, grid_sum_z / np.maximum(1.0, grid_count), default_z_top)
+
+            # 2D 3x3 smoothing pass across grid_z for organic, ripple-smoothed pool surface
+            kernel_center = 0.50
+            kernel_cardinal = 0.09
+            kernel_diagonal = 0.035
+            smoothed_z = np.copy(grid_z)
+            for i in range(nx):
+                i_prev = max(0, i - 1)
+                i_next = min(nx - 1, i + 1)
+                for j in range(ny):
+                    j_prev = max(0, j - 1)
+                    j_next = min(ny - 1, j + 1)
+                    val = (
+                        kernel_center * grid_z[i, j]
+                        + kernel_cardinal
+                        * (grid_z[i_prev, j] + grid_z[i_next, j] + grid_z[i, j_prev] + grid_z[i, j_next])
+                        + kernel_diagonal
+                        * (
+                            grid_z[i_prev, j_prev]
+                            + grid_z[i_prev, j_next]
+                            + grid_z[i_next, j_prev]
+                            + grid_z[i_next, j_next]
+                        )
+                    )
+                    smoothed_z[i, j] = val
+            grid_z = smoothed_z
 
     def sample_z(x_arr: np.ndarray, y_arr: np.ndarray) -> np.ndarray:
-        gx = np.clip(np.floor((x_arr - x_min) / dx).astype(int), 0, nx - 1)
-        gy = np.clip(np.floor((y_arr - y_min) / dy).astype(int), 0, ny - 1)
-        return grid_z[gx, gy]
+        gx = (x_arr - x_min) / dx - 0.5
+        gy = (y_arr - y_min) / dy - 0.5
+        i0 = np.clip(np.floor(gx).astype(int), 0, nx - 1)
+        i1 = np.clip(i0 + 1, 0, nx - 1)
+        j0 = np.clip(np.floor(gy).astype(int), 0, ny - 1)
+        j1 = np.clip(j0 + 1, 0, ny - 1)
+        fx = np.clip(gx - i0, 0.0, 1.0)
+        fy = np.clip(gy - j0, 0.0, 1.0)
+
+        z00 = grid_z[i0, j0]
+        z10 = grid_z[i1, j0]
+        z01 = grid_z[i0, j1]
+        z11 = grid_z[i1, j1]
+
+        z0 = z00 * (1.0 - fx) + z10 * fx
+        z1 = z01 * (1.0 - fx) + z11 * fx
+        return z0 * (1.0 - fy) + z1 * fy
 
     # Top center vertex (index 0)
     z_c = float(sample_z(np.array([cx]), np.array([cy]))[0])
@@ -287,6 +333,11 @@ def generate_manifold_mesh_around_particles(
             ]
         )
         hull = ConvexHull(pts_expanded)
+        # Volume inflation guardrail: prevent sparse points from producing huge hollow volumes
+        if hull.volume > 3.5 * vol:
+            centroid = tuple(float(x) for x in np.mean(positions, axis=0))
+            return generate_sphere_mesh(center=centroid, radius=equiv_radius)
+
         unique_indices = np.unique(hull.simplices)
         index_map = {orig: new for new, orig in enumerate(unique_indices)}
         vertices = pts_expanded[unique_indices].astype(np.float32)
@@ -1146,8 +1197,13 @@ class FluidBody(BaseModel):
                 )
 
             case _:
+                r_val = (
+                    self.cad_context.r_s
+                    if self.cad_context is not None and hasattr(self.cad_context, "r_s") and self.cad_context.r_s > 0.0
+                    else 0.0025
+                )
                 if self.surface_positions is not None and len(self.surface_positions) >= 4:
-                    return generate_manifold_mesh_around_particles(self.surface_positions)
+                    return generate_manifold_mesh_around_particles(self.surface_positions, r_s=r_val)
                 equiv_radius = max(0.002, (3.0 * max(1e-9, self.volume) / (4.0 * math.pi)) ** (1.0 / 3.0))
                 equiv_radius = min(equiv_radius, max(0.004, (self.bounds_max[2] - self.bounds_min[2]) / 2.0))
                 return generate_sphere_mesh(center=self.centroid, radius=equiv_radius, n_lat=10, n_lon=20)
@@ -1593,7 +1649,7 @@ class FluidBody(BaseModel):
         return self
 
 
-def cluster_particles(positions: np.ndarray, max_dist: float = 0.020) -> list[np.ndarray]:
+def cluster_particles(positions: np.ndarray, max_dist: float = 0.007) -> list[np.ndarray]:
     """Group 3D particles into spatially connected clusters within max_dist threshold."""
     if positions is None or len(positions) == 0:
         return []
@@ -1868,7 +1924,7 @@ class FluidBodyTracker:
             )
 
         # 8. Splash Clusters (airborne droplets not part of any active waterfall)
-        is_cluster = in_basin & (pos_act[:, 2] > z_pool_surf) & (~all_drain_column_mask)
+        is_cluster = in_basin & (pos_act[:, 2] > z_pool_surf) & (~all_drain_column_mask) & (~all_drain_wf_mask)
 
         active_bodies: list[FluidBody] = []
         for b_type, stage, feat_type, tier, b_id, mask, feat_inst in body_specs:
@@ -1890,12 +1946,13 @@ class FluidBodyTracker:
             self.bodies[b_id if b_type != FluidBodyType.POOL else (b_id + 100)] = body
             active_bodies.append(body)
 
-        # Clusters for free splash droplets
+        # Clusters for free splash droplets: group only closely connected particles
         cluster_indices = active_indices[is_cluster]
         if len(cluster_indices) > 0:
-            cluster_subsets = cluster_particles(pos_arr[cluster_indices], max_dist=0.020)
-            if len(cluster_subsets) > 10:
-                cluster_subsets = sorted(cluster_subsets, key=len, reverse=True)[:10]
+            cluster_max_dist = max(0.006, self.r_s * 2.5)
+            cluster_subsets = cluster_particles(pos_arr[cluster_indices], max_dist=cluster_max_dist)
+            if len(cluster_subsets) > 30:
+                cluster_subsets = sorted(cluster_subsets, key=len, reverse=True)[:30]
             for idx, c_subset in enumerate(cluster_subsets):
                 c_indices = cluster_indices[c_subset]
                 child = FluidBody(
@@ -1903,6 +1960,7 @@ class FluidBodyTracker:
                     body_type=FluidBodyType.CLUSTER,
                     stage=FluidStage.SPLASH_CLUSTER,
                     particle_indices=c_indices,
+                    cad_context=ctx,
                 )
                 child.recompute_shape(pos_arr, vel_arr, self.r_s)
                 active_bodies.append(child)
