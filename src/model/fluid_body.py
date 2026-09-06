@@ -1,5 +1,7 @@
 """Dynamic fluid body primitives and volume tracking models."""
 
+from __future__ import annotations
+
 from enum import Enum
 import math
 from typing import Any, NamedTuple, Optional, Sequence, Union
@@ -127,24 +129,52 @@ def generate_heightfield_cylinder_mesh(
     dx = max(1e-4, (x_max - x_min) / nx)
     dy = max(1e-4, (y_max - y_min) / ny)
     grid_z = np.full((nx, ny), default_z_top, dtype=np.float32)
+    grid_count = np.zeros((nx, ny), dtype=np.float32)
+    grid_sum_z = np.zeros((nx, ny), dtype=np.float32)
 
     if surface_positions is not None and len(surface_positions) > 0:
         d_center_sq = (surface_positions[:, 0] - cx) ** 2 + (surface_positions[:, 1] - cy) ** 2
         in_bounds = (
             (d_center_sq <= (radius + 1e-4) ** 2)
             & (surface_positions[:, 2] >= z_floor)
-            & (surface_positions[:, 2] <= default_z_top + 0.010)
+            & (surface_positions[:, 2] <= default_z_top + 0.015)
         )
         valid_pos = surface_positions[in_bounds]
         if len(valid_pos) > 0:
             ix = np.clip(np.floor((valid_pos[:, 0] - x_min) / dx).astype(int), 0, nx - 1)
             iy = np.clip(np.floor((valid_pos[:, 1] - y_min) / dy).astype(int), 0, ny - 1)
-            np.maximum.at(grid_z, (ix, iy), valid_pos[:, 2])
+            np.add.at(grid_count, (ix, iy), 1.0)
+            np.add.at(grid_sum_z, (ix, iy), valid_pos[:, 2])
+
+            has_samples = grid_count > 0.0
+            grid_z = np.where(has_samples, grid_sum_z / np.maximum(1.0, grid_count), default_z_top)
+
+            # Vectorized 2D 3x3 smoothing pass across grid_z for organic, ripple-smoothed pool surface
+            pad = np.pad(grid_z, 1, mode="edge")
+            grid_z = (
+                0.50 * pad[1:-1, 1:-1]
+                + 0.09 * (pad[:-2, 1:-1] + pad[2:, 1:-1] + pad[1:-1, :-2] + pad[1:-1, 2:])
+                + 0.035 * (pad[:-2, :-2] + pad[:-2, 2:] + pad[2:, :-2] + pad[2:, 2:])
+            )
 
     def sample_z(x_arr: np.ndarray, y_arr: np.ndarray) -> np.ndarray:
-        gx = np.clip(np.floor((x_arr - x_min) / dx).astype(int), 0, nx - 1)
-        gy = np.clip(np.floor((y_arr - y_min) / dy).astype(int), 0, ny - 1)
-        return grid_z[gx, gy]
+        gx = (x_arr - x_min) / dx - 0.5
+        gy = (y_arr - y_min) / dy - 0.5
+        i0 = np.clip(np.floor(gx).astype(int), 0, nx - 1)
+        i1 = np.clip(i0 + 1, 0, nx - 1)
+        j0 = np.clip(np.floor(gy).astype(int), 0, ny - 1)
+        j1 = np.clip(j0 + 1, 0, ny - 1)
+        fx = np.clip(gx - i0, 0.0, 1.0)
+        fy = np.clip(gy - j0, 0.0, 1.0)
+
+        z00 = grid_z[i0, j0]
+        z10 = grid_z[i1, j0]
+        z01 = grid_z[i0, j1]
+        z11 = grid_z[i1, j1]
+
+        z0 = z00 * (1.0 - fx) + z10 * fx
+        z1 = z01 * (1.0 - fx) + z11 * fx
+        return z0 * (1.0 - fy) + z1 * fy
 
     # Top center vertex (index 0)
     z_c = float(sample_z(np.array([cx]), np.array([cy]))[0])
@@ -287,6 +317,11 @@ def generate_manifold_mesh_around_particles(
             ]
         )
         hull = ConvexHull(pts_expanded)
+        # Volume inflation guardrail: prevent sparse points from producing huge hollow volumes
+        if hull.volume > 3.5 * vol:
+            centroid = tuple(float(x) for x in np.mean(positions, axis=0))
+            return generate_sphere_mesh(center=centroid, radius=equiv_radius)
+
         unique_indices = np.unique(hull.simplices)
         index_map = {orig: new for new, orig in enumerate(unique_indices)}
         vertices = pts_expanded[unique_indices].astype(np.float32)
@@ -442,6 +477,164 @@ def generate_waterfall_mesh(
     return vertices_arr, faces_arr
 
 
+def generate_arc_waterfall_mesh(
+    positions: Optional[np.ndarray] = None,
+    arc_center_xy: tuple[float, float] = (0.0, -0.020),
+    arc_radius: float = 0.055,
+    theta_start: float = -0.25,
+    theta_end: float = 0.25,
+    z_top: float = 0.105,
+    z_bot: float = 0.045,
+    thickness: float = 0.003,
+    n_segments: int = 16,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a watertight 3D curved arc waterfall mesh cascading off a curved boundary edge."""
+    cx, cy = arc_center_xy
+    r_out = arc_radius
+    r_in = max(0.002, arc_radius - thickness)
+
+    if theta_start > theta_end:
+        theta_start, theta_end = theta_end, theta_start
+
+    theta = np.linspace(theta_start, theta_end, n_segments)
+    sin_t = np.sin(theta)
+    cos_t = np.cos(theta)
+
+    vertices = []
+    for seg in range(n_segments):
+        vertices.append([cx + r_out * sin_t[seg], cy + r_out * cos_t[seg], z_top])
+    for seg in range(n_segments):
+        vertices.append([cx + r_in * sin_t[seg], cy + r_in * cos_t[seg], z_top])
+    for seg in range(n_segments):
+        vertices.append([cx + r_out * sin_t[seg], cy + r_out * cos_t[seg], z_bot])
+    for seg in range(n_segments):
+        vertices.append([cx + r_in * sin_t[seg], cy + r_in * cos_t[seg], z_bot])
+
+    vertices_arr = np.array(vertices, dtype=np.float32)
+    faces = []
+
+    r2_offset = 2 * n_segments
+    r3_offset = 3 * n_segments
+
+    # 1. Top Annular Cap
+    for seg in range(n_segments - 1):
+        next_seg = seg + 1
+        faces.append([seg, n_segments + next_seg, next_seg])
+        faces.append([seg, n_segments + seg, n_segments + next_seg])
+
+    # 2. Outer Curtain
+    for seg in range(n_segments - 1):
+        next_seg = seg + 1
+        faces.append([seg, r2_offset + next_seg, r2_offset + seg])
+        faces.append([seg, next_seg, r2_offset + next_seg])
+
+    # 3. Inner Curtain
+    for seg in range(n_segments - 1):
+        next_seg = seg + 1
+        faces.append([n_segments + seg, r3_offset + next_seg, n_segments + next_seg])
+        faces.append([n_segments + seg, r3_offset + seg, r3_offset + next_seg])
+
+    # 4. Bottom Annular Cap
+    for seg in range(n_segments - 1):
+        next_seg = seg + 1
+        faces.append([r2_offset + seg, r3_offset + seg, r3_offset + next_seg])
+        faces.append([r2_offset + seg, r3_offset + next_seg, r2_offset + next_seg])
+
+    # 5. Left End Cap (seg = 0)
+    faces.append([0, r3_offset, n_segments])
+    faces.append([0, r2_offset, r3_offset])
+
+    # 6. Right End Cap (seg = n_segments - 1)
+    last = n_segments - 1
+    faces.append([last, n_segments + last, r3_offset + last])
+    faces.append([last, r3_offset + last, r2_offset + last])
+
+    faces_arr = np.array(faces, dtype=np.uint32)
+    return vertices_arr, faces_arr
+
+
+_LID_POCKET_TEMPLATE_CACHE: dict[Any, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def generate_lid_pocket_mesh(
+    pos: tuple[float, float, float],
+    radius: float,
+    height: float,
+    ctx: Optional[FluidCADContext] = None,
+    deflection: float = 0.0005,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a watertight 3D annular lid pocket mesh cutting out terrace and drain apertures with template caching."""
+    terraces_tuple = ()
+    cutouts_tuple = ()
+    drains_tuple = ()
+    if ctx is not None:
+        terraces_tuple = tuple((round(float(t.x), 4), round(float(t.y), 4), round(float(t.r), 4)) for t in ctx.terraces)
+        cutouts_tuple = tuple((round(float(c.x), 4), round(float(c.y), 4), round(float(c.r), 4)) for c in ctx.cutouts)
+        if len(cutouts_tuple) == 0:
+            drains_tuple = tuple(
+                (round(float(d.x), 4), round(float(d.y), 4), round(float(d.r), 4)) for d in ctx.drains if d.r > 0.020
+            )
+
+    cache_key = (
+        round(float(pos[0]), 4),
+        round(float(pos[1]), 4),
+        round(float(radius), 4),
+        terraces_tuple,
+        cutouts_tuple,
+        drains_tuple,
+    )
+
+    if cache_key not in _LID_POCKET_TEMPLATE_CACHE:
+        from build123d import Align, BuildPart, Cylinder, Locations, Mode
+
+        unit_h = 1.0
+        with BuildPart() as bp:
+            Cylinder(radius=radius, height=unit_h, align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.ADD)
+            if ctx is not None:
+                for terrace in ctx.terraces:
+                    if terrace.r > 0.0:
+                        with Locations((terrace.x - pos[0], terrace.y - pos[1], 0.0)):
+                            Cylinder(
+                                radius=terrace.r,
+                                height=unit_h * 3.0,
+                                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+                                mode=Mode.SUBTRACT,
+                            )
+                for cutout in ctx.cutouts:
+                    if cutout.r > 0.0:
+                        with Locations((cutout.x - pos[0], cutout.y - pos[1], 0.0)):
+                            Cylinder(
+                                radius=cutout.r,
+                                height=unit_h * 3.0,
+                                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+                                mode=Mode.SUBTRACT,
+                            )
+                if len(ctx.cutouts) == 0:
+                    for drain in ctx.drains:
+                        if drain.r > 0.020:
+                            with Locations((drain.x - pos[0], drain.y - pos[1], 0.0)):
+                                Cylinder(
+                                    radius=drain.r,
+                                    height=unit_h * 3.0,
+                                    align=(Align.CENTER, Align.CENTER, Align.CENTER),
+                                    mode=Mode.SUBTRACT,
+                                )
+        verts, triangles = bp.part.tessellate(deflection)
+        if len(verts) > 0 and len(triangles) > 0:
+            unit_verts = np.array([[v.X + pos[0], v.Y + pos[1], v.Z] for v in verts], dtype=np.float32)
+            faces_arr = np.array(triangles, dtype=np.uint32)
+            _LID_POCKET_TEMPLATE_CACHE[cache_key] = (unit_verts, faces_arr)
+        else:
+            return generate_heightfield_cylinder_mesh(
+                radius=radius, z_floor=pos[2], default_z_top=pos[2] + height, center=(pos[0], pos[1])
+            )
+
+    unit_verts, faces_arr = _LID_POCKET_TEMPLATE_CACHE[cache_key]
+    out_verts = unit_verts.copy()
+    out_verts[:, 2] = pos[2] + out_verts[:, 2] * height
+    return out_verts, faces_arr
+
+
 class FluidBodyType(str, Enum):
     """Semantic classification of dynamic fluid bodies."""
 
@@ -476,7 +669,7 @@ class CADFeatureType(str, Enum):
 
 
 class CADFeature(NamedTuple):
-    """Spatial 4D coordinate tuple (X, Y, Z, R) with semantic CADFeatureType and optional label."""
+    """Spatial 4D coordinate tuple (X, Y, Z, R) with semantic CADFeatureType, optional label, and arc parameters."""
 
     feature_type: CADFeatureType = CADFeatureType.TUBE
     x: float = 0.0
@@ -484,6 +677,12 @@ class CADFeature(NamedTuple):
     z: float = 0.0
     r: float = 0.0
     label: Optional[str] = None
+    arc_center_x: float = 0.0
+    arc_center_y: float = 0.0
+    arc_radius: float = 0.0
+    theta_start: float = 0.0
+    theta_end: float = 0.0
+    is_arc: bool = False
 
     @property
     def name(self) -> str:
@@ -584,6 +783,9 @@ class FluidCADContext(NamedTuple):
         z_lid: float,
         drain_r: float,
         tube_r: float = 0.0,
+        terrace_x: float = 0.0,
+        terrace_y: float = 0.0,
+        terrace_r: float = 0.0,
     ) -> tuple[list[CADFeature], list[CADFeature]]:
         """Construct dynamic drain spillway stream features and cutout aperture features from geometric parameters."""
         drain_features: list[CADFeature] = []
@@ -604,25 +806,101 @@ class FluidCADContext(NamedTuple):
         stream_r = max(1e-4, stream_r)
         aperture_ratio = drain_r / stream_r
 
+        # Determine platform front lip geometry for waterfall attachment (facing South / -Y into cutout opening)
+        plat_cx = terrace_x
+        plat_cy = terrace_y if terrace_r > 0.0 else (drain_y + drain_r * 0.85)
+        plat_r = terrace_r if terrace_r > 0.0 else max(0.015, drain_r * 0.50)
+
         if aperture_ratio > 1.5:
-            # Wide aperture: generate multi-stream spillways spaced dynamically along the cutout arc
-            n_streams = min(3, max(3, round(aperture_ratio)))
-            max_angle = math.pi / 4.0
-            for i in range(n_streams):
-                norm = (i / (n_streams - 1) - 0.5) * 2.0
-                angle = norm * max_angle
-                x = drain_x + drain_r * math.sin(angle) * 0.707
-                y = drain_y + drain_r * (1.0 - math.cos(angle)) * 0.50
-                if math.isclose(norm, 0.0, abs_tol=1e-4):
-                    label = "Drain_Center"
-                elif norm < 0.0:
-                    label = "Drain_Left" if n_streams == 3 else f"Drain_Left_{abs(i - n_streams // 2)}"
-                else:
-                    label = "Drain_Right" if n_streams == 3 else f"Drain_Right_{i - n_streams // 2}"
-                drain_features.append(CADFeature(CADFeatureType.DRAIN, label=label, x=x, y=y, z=z_lid, r=stream_r))
-        else:
+            # Multi-spillway configuration attached to the front lip of the drinking shelf / platform
+            # Center spillway: theta around pi (180 deg, pointing South towards -Y directly into cutout opening)
+            th_c_span = 0.70
+            th_c_start = math.pi - th_c_span / 2.0
+            th_c_end = math.pi + th_c_span / 2.0
+            x_c = plat_cx + plat_r * math.sin(math.pi)
+            y_c = plat_cy + plat_r * math.cos(math.pi)
+
+            # Left spillway: theta spanning [pi + 0.35, pi + 0.90] (around 215 deg)
+            th_l_start = math.pi + 0.35
+            th_l_end = math.pi + 0.90
+            l_angle = (th_l_start + th_l_end) / 2.0
+            x_l = plat_cx + plat_r * math.sin(l_angle)
+            y_l = plat_cy + plat_r * math.cos(l_angle)
+
+            # Right spillway: theta spanning [pi - 0.90, pi - 0.35] (around 145 deg)
+            th_r_start = math.pi - 0.90
+            th_r_end = math.pi - 0.35
+            r_angle = (th_r_start + th_r_end) / 2.0
+            x_r = plat_cx + plat_r * math.sin(r_angle)
+            y_r = plat_cy + plat_r * math.cos(r_angle)
+
             drain_features.append(
-                CADFeature(CADFeatureType.DRAIN, label="Drain_Center", x=drain_x, y=drain_y, z=z_lid, r=drain_r)
+                CADFeature(
+                    CADFeatureType.DRAIN,
+                    label="Drain_Left",
+                    x=x_l,
+                    y=y_l,
+                    z=z_lid,
+                    r=stream_r,
+                    arc_center_x=plat_cx,
+                    arc_center_y=plat_cy,
+                    arc_radius=plat_r,
+                    theta_start=th_l_start,
+                    theta_end=th_l_end,
+                    is_arc=True,
+                )
+            )
+            drain_features.append(
+                CADFeature(
+                    CADFeatureType.DRAIN,
+                    label="Drain_Center",
+                    x=x_c,
+                    y=y_c,
+                    z=z_lid,
+                    r=stream_r,
+                    arc_center_x=plat_cx,
+                    arc_center_y=plat_cy,
+                    arc_radius=plat_r,
+                    theta_start=th_c_start,
+                    theta_end=th_c_end,
+                    is_arc=True,
+                )
+            )
+            drain_features.append(
+                CADFeature(
+                    CADFeatureType.DRAIN,
+                    label="Drain_Right",
+                    x=x_r,
+                    y=y_r,
+                    z=z_lid,
+                    r=stream_r,
+                    arc_center_x=plat_cx,
+                    arc_center_y=plat_cy,
+                    arc_radius=plat_r,
+                    theta_start=th_r_start,
+                    theta_end=th_r_end,
+                    is_arc=True,
+                )
+            )
+        else:
+            th_span = math.pi / 4.0
+            x = plat_cx
+            y = plat_cy - plat_r
+            drain_features.append(
+                CADFeature(
+                    CADFeatureType.DRAIN,
+                    label="Drain_Center",
+                    x=x,
+                    y=y,
+                    z=z_lid,
+                    r=drain_r,
+                    arc_center_x=plat_cx,
+                    arc_center_y=plat_cy,
+                    arc_radius=plat_r,
+                    theta_start=math.pi - th_span / 2.0,
+                    theta_end=math.pi + th_span / 2.0,
+                    is_arc=True,
+                )
             )
 
         return drain_features, cutout_features
@@ -652,6 +930,9 @@ class FluidCADContext(NamedTuple):
             z_lid=z_lid,
             drain_r=drain_r,
             tube_r=tube_r,
+            terrace_x=0.0,
+            terrace_y=tube_y,
+            terrace_r=terrace_r,
         )
 
         return cls(
@@ -673,6 +954,24 @@ class FluidCADContext(NamedTuple):
         features: list[CADFeature] = []
         z_floor = 0.0
         tube_r = 0.0
+        terrace_x = 0.0
+        terrace_y = 0.0
+        terrace_r = 0.0
+
+        # Pass 1: Collect terrace / platform parameters
+        for b in boundaries:
+            is_terrace = getattr(b, "has_intake", False) or getattr(b, "link_type", None) in (
+                LinkType.OUTLET,
+                "terrace",
+            )
+            if is_terrace:
+                xyz = getattr(b, "xyz", (0.0, 0.0, 0.0))
+                radius = getattr(b, "radius", 0.0) or 0.0
+                intake_pos = getattr(b, "intake_pos", xyz)
+                intake_r = getattr(b, "intake_radius", radius)
+                terrace_x = float(intake_pos[0])
+                terrace_y = float(intake_pos[1])
+                terrace_r = float(intake_r)
 
         for b in boundaries:
             link_type = getattr(b, "link_type", None)
@@ -755,9 +1054,14 @@ class FluidCADContext(NamedTuple):
                         z_lid=z_lid,
                         drain_r=d_rad,
                         tube_r=tube_r,
+                        terrace_x=terrace_x,
+                        terrace_y=terrace_y,
+                        terrace_r=terrace_r,
                     )
                     features.extend(c_feats)
                     features.extend(d_feats)
+
+        return cls(features=tuple(features))
 
         return cls(features=tuple(features))
 
@@ -825,30 +1129,14 @@ class FluidBody(BaseModel):
                 ry = (self.bounds_max[1] - self.bounds_min[1]) / 2.0
                 radius = max(0.010, (rx + ry) / 2.0)
                 if self.feature_type == CADFeatureType.POCKET or self.tier == 1 or self.stage == FluidStage.LID_POOL:
-                    solid = self.to_cad_solid()
-                    if hasattr(solid, "tessellate"):
-                        verts, triangles = solid.tessellate(0.0005)
-                        if len(verts) > 0 and len(triangles) > 0:
-                            verts_arr = np.array([[v.X, v.Y, v.Z] for v in verts], dtype=np.float32)
-                            faces_arr = np.array(triangles, dtype=np.uint32)
-                            return verts_arr, faces_arr
-
-                    center = (feat.x, feat.y) if feat is not None else (0.0, 0.0)
-                    z_floor_val = ctx.z_lid if ctx is not None and ctx.z_lid > 0.0 else z_min
-                    z_top_val = min(
-                        feat.z if feat is not None and feat.z > 0.0 else (z_floor_val + 0.010),
-                        max(z_max, z_floor_val + 0.003),
+                    pos = (
+                        feat.x if feat is not None else 0.0,
+                        feat.y if feat is not None else 0.0,
+                        ctx.z_lid if ctx is not None and ctx.z_lid > 0.0 else z_min,
                     )
                     radius = feat.r if feat is not None and feat.r > 0.0 else radius
-                    return generate_heightfield_cylinder_mesh(
-                        radius=radius,
-                        z_floor=z_floor_val,
-                        surface_positions=self.surface_positions,
-                        default_z_top=z_top_val,
-                        center=center,
-                        n_rings=6,
-                        n_spokes=n_segments,
-                    )
+                    h = max(0.002, min(0.008, z_max - pos[2]))
+                    return generate_lid_pocket_mesh(pos=pos, radius=radius, height=h, ctx=ctx)
                 else:
                     center = (feat.x, feat.y) if feat is not None else (0.0, 0.0)
                     z_floor_val = ctx.z_floor if ctx is not None and ctx.z_floor > 0.0 else z_min
@@ -900,6 +1188,27 @@ class FluidBody(BaseModel):
                     )
 
                 # Lower Drain Waterfall: Plunges from lid pool cutout down into reservoir bowl pool
+                z_top_val = (ctx.z_lid + 0.003) if ctx is not None and ctx.z_lid > 0.0 else z_max
+                if self.surface_positions is not None and len(self.surface_positions) > 0:
+                    max_stream_z = float(np.max(self.surface_positions[:, 2]))
+                    z_top_val = max(z_top_val, min(max_stream_z + 0.002, z_max))
+
+                z_bot_val = (ctx.z_floor + 0.015) if ctx is not None and ctx.z_floor > 0.0 else z_min
+                if self.surface_positions is not None and len(self.surface_positions) > 0:
+                    z_bot_val = max(z_bot_val, float(np.min(self.surface_positions[:, 2])) - 0.003)
+
+                if feat is not None and getattr(feat, "is_arc", False):
+                    return generate_arc_waterfall_mesh(
+                        self.surface_positions,
+                        arc_center_xy=(feat.arc_center_x, feat.arc_center_y),
+                        arc_radius=feat.arc_radius,
+                        theta_start=feat.theta_start,
+                        theta_end=feat.theta_end,
+                        z_top=z_top_val,
+                        z_bot=z_bot_val,
+                        n_segments=n_segments,
+                    )
+
                 if self.surface_positions is not None and len(self.surface_positions) > 0:
                     mean_stream_xy = (
                         float(np.mean(self.surface_positions[:, 0])),
@@ -909,14 +1218,6 @@ class FluidBody(BaseModel):
                     mean_stream_xy = (feat.x, feat.y) if feat is not None else (0.0, 0.0)
 
                 stream_r = min(0.012, max(0.006, feat.r if feat else 0.010))
-                z_top_val = (ctx.z_lid + 0.003) if ctx is not None and ctx.z_lid > 0.0 else z_max
-                if self.surface_positions is not None and len(self.surface_positions) > 0:
-                    max_stream_z = float(np.max(self.surface_positions[:, 2]))
-                    z_top_val = max(z_top_val, min(max_stream_z + 0.002, z_max))
-
-                z_bot_val = (ctx.z_floor + 0.015) if ctx is not None and ctx.z_floor > 0.0 else z_min
-                if self.surface_positions is not None and len(self.surface_positions) > 0:
-                    z_bot_val = max(z_bot_val, float(np.min(self.surface_positions[:, 2])) - 0.003)
                 return generate_waterfall_mesh(
                     self.surface_positions,
                     z_top=z_top_val,
@@ -946,15 +1247,34 @@ class FluidBody(BaseModel):
                 )
 
             case _:
+                r_val = (
+                    self.cad_context.r_s
+                    if self.cad_context is not None and hasattr(self.cad_context, "r_s") and self.cad_context.r_s > 0.0
+                    else 0.0025
+                )
                 if self.surface_positions is not None and len(self.surface_positions) >= 4:
-                    return generate_manifold_mesh_around_particles(self.surface_positions)
+                    return generate_manifold_mesh_around_particles(self.surface_positions, r_s=r_val)
                 equiv_radius = max(0.002, (3.0 * max(1e-9, self.volume) / (4.0 * math.pi)) ** (1.0 / 3.0))
                 equiv_radius = min(equiv_radius, max(0.004, (self.bounds_max[2] - self.bounds_min[2]) / 2.0))
                 return generate_sphere_mesh(center=self.centroid, radius=equiv_radius, n_lat=10, n_lon=20)
 
     def to_cad_solid(self) -> Any:
         """Build and return a watertight build123d Solid representation conforming to CAD design principles."""
-        from build123d import Align, BuildPart, Cylinder, Location, Locations, Mode, Sphere
+        from build123d import (
+            Align,
+            BuildLine,
+            BuildPart,
+            BuildSketch,
+            Cylinder,
+            Line,
+            Location,
+            Locations,
+            Mode,
+            Sphere,
+            ThreePointArc,
+            extrude,
+            make_face,
+        )
 
         cx, cy, _ = self.centroid
         z_min = self.bounds_min[2]
@@ -1062,6 +1382,60 @@ class FluidBody(BaseModel):
                     c = Cylinder(radius=radius, height=h, align=(Align.CENTER, Align.CENTER, Align.MIN))
                     return c.locate(Location(pos))
                 else:
+                    z_top_val = (ctx.z_lid + 0.003) if ctx is not None and ctx.z_lid > 0.0 else z_max
+                    if self.surface_positions is not None and len(self.surface_positions) > 0:
+                        max_stream_z = float(np.max(self.surface_positions[:, 2]))
+                        z_top_val = max(z_top_val, min(max_stream_z + 0.002, z_max))
+
+                    z_bot_val = ctx.z_floor if ctx is not None and ctx.z_floor > 0.0 else z_min
+
+                    if feat is not None and getattr(feat, "is_arc", False):
+                        arc_cx, arc_cy = feat.arc_center_x, feat.arc_center_y
+                        arc_r_out = feat.arc_radius
+                        arc_thick = 0.003
+                        arc_r_in = max(0.002, arc_r_out - arc_thick)
+                        arc_h = max(0.005, z_top_val - z_bot_val)
+                        t_start, t_end = feat.theta_start, feat.theta_end
+                        if t_start > t_end:
+                            t_start, t_end = t_end, t_start
+                        t_mid = (t_start + t_end) / 2.0
+
+                        p_in_start = (
+                            arc_cx + arc_r_in * math.sin(t_start),
+                            arc_cy + arc_r_in * math.cos(t_start),
+                        )
+                        p_out_start = (
+                            arc_cx + arc_r_out * math.sin(t_start),
+                            arc_cy + arc_r_out * math.cos(t_start),
+                        )
+                        p_in_mid = (
+                            arc_cx + arc_r_in * math.sin(t_mid),
+                            arc_cy + arc_r_in * math.cos(t_mid),
+                        )
+                        p_out_mid = (
+                            arc_cx + arc_r_out * math.sin(t_mid),
+                            arc_cy + arc_r_out * math.cos(t_mid),
+                        )
+                        p_in_end = (
+                            arc_cx + arc_r_in * math.sin(t_end),
+                            arc_cy + arc_r_in * math.cos(t_end),
+                        )
+                        p_out_end = (
+                            arc_cx + arc_r_out * math.sin(t_end),
+                            arc_cy + arc_r_out * math.cos(t_end),
+                        )
+
+                        with BuildPart() as bp:
+                            with BuildSketch() as bs:
+                                with BuildLine() as bl:
+                                    Line(p_in_start, p_out_start)
+                                    ThreePointArc(p_out_start, p_out_mid, p_out_end)
+                                    Line(p_out_end, p_in_end)
+                                    ThreePointArc(p_in_end, p_in_mid, p_in_start)
+                                make_face()
+                            extrude(amount=arc_h)
+                        return bp.part.locate(Location((0, 0, z_bot_val)))
+
                     if self.surface_positions is not None and len(self.surface_positions) > 0:
                         stream_xy = (
                             float(np.mean(self.surface_positions[:, 0])),
@@ -1073,14 +1447,9 @@ class FluidBody(BaseModel):
                     pos = (
                         stream_xy[0],
                         stream_xy[1],
-                        ctx.z_floor if ctx is not None and ctx.z_floor > 0.0 else z_min,
+                        z_bot_val,
                     )
                     stream_r = min(0.012, max(0.006, feat.r if feat else 0.010))
-                    z_top_val = (ctx.z_lid + 0.003) if ctx is not None and ctx.z_lid > 0.0 else z_max
-                    if self.surface_positions is not None and len(self.surface_positions) > 0:
-                        max_stream_z = float(np.max(self.surface_positions[:, 2]))
-                        z_top_val = max(z_top_val, min(max_stream_z + 0.002, z_max))
-
                     h = max(
                         0.010,
                         z_top_val - pos[2],
@@ -1330,7 +1699,7 @@ class FluidBody(BaseModel):
         return self
 
 
-def cluster_particles(positions: np.ndarray, max_dist: float = 0.020) -> list[np.ndarray]:
+def cluster_particles(positions: np.ndarray, max_dist: float = 0.007) -> list[np.ndarray]:
     """Group 3D particles into spatially connected clusters within max_dist threshold."""
     if positions is None or len(positions) == 0:
         return []
@@ -1404,11 +1773,17 @@ class FluidBodyTracker:
         Returns:
             List of active FluidBody instances with recomputed physical shapes.
         """
-        if len(positions) == 0:
+        if positions is None or len(positions) == 0:
             self.bodies.clear()
             return []
 
-        active = positions[:, 2] < 100.0
+        pos_arr = np.asarray(positions, dtype=np.float32)
+        if velocities is None or len(velocities) != len(pos_arr):
+            vel_arr = np.zeros_like(pos_arr)
+        else:
+            vel_arr = np.asarray(velocities, dtype=np.float32)
+
+        active = pos_arr[:, 2] < 100.0
         active_indices = np.flatnonzero(active)
 
         if len(active_indices) == 0:
@@ -1425,7 +1800,8 @@ class FluidBodyTracker:
 
         bowl = ctx.get(CADFeatureType.BOWL)
 
-        pos_act = positions[active_indices]
+        pos_act = pos_arr[active_indices]
+        vel_act = vel_arr[active_indices]
         d_tube_xy = np.sqrt(pos_act[:, 0] ** 2 + (pos_act[:, 1] - tube_y) ** 2)
 
         # 1. Delivery Stream rising inside the delivery tube
@@ -1542,6 +1918,7 @@ class FluidBodyTracker:
 
         # 6. Drains: Waterfall per drain with upstream adjacent inflow activation check
         z_terrace_max = max([t.z for t in ctx.terraces], default=z_lid)
+        all_drain_wf_mask = np.zeros(len(pos_act), dtype=bool)
         for d_idx, drain in enumerate(ctx.drains):
             d_d_xy = np.sqrt((pos_act[:, 0] - drain.x) ** 2 + (pos_act[:, 1] - drain.y) ** 2)
             drain_rad = max(0.015, drain.r + self.r_s * 2.0)
@@ -1549,25 +1926,31 @@ class FluidBodyTracker:
 
             # Check upstream inflow from both routes:
             # Route A: Fluid at lid shelf reaching drain aperture
-            lid_inflow_fluid = (pos_act[:, 2] >= z_lid - self.r_s) & (d_d_xy <= drain.r + self.r_s * 2.0)
+            lid_inflow_fluid = (pos_act[:, 2] >= z_lid - max(0.008, self.r_s * 3.0)) & (
+                d_d_xy <= max(0.015, drain.r + self.r_s * 2.0)
+            )
             # Route B: Fluid plunging directly from top terrace sheet into drain aperture
-            top_sheet_inflow_fluid = (pos_act[:, 2] >= z_plat_mid) & (d_d_xy <= drain_rad + max(0.010, self.r_s * 3.0))
+            top_sheet_inflow_fluid = (pos_act[:, 2] >= z_plat_mid) & (d_d_xy <= max(0.020, drain.r + self.r_s * 3.0))
 
             has_drain_inflow = (np.count_nonzero(lid_inflow_fluid) >= 2) or (
                 np.count_nonzero(top_sheet_inflow_fluid) >= 2
             )
 
             # Falling particles in the air column between top sheet / lid and pool surface
+            # Must be strictly above the reservoir pool surface by at least 2*r_s
             falling_in_col = (
-                (pos_act[:, 2] > z_pool_surf)
+                (pos_act[:, 2] > z_pool_surf + self.r_s * 2.0)
                 & (pos_act[:, 2] <= z_terrace_max + self.r_s)
                 & in_drain_zone
                 & (~is_stream)
             )
-            has_falling_col = np.count_nonzero(falling_in_col) >= 2
+            active_falling = falling_in_col & (vel_act[:, 2] < -0.02)
+            has_aperture_origin = np.count_nonzero(lid_inflow_fluid | top_sheet_inflow_fluid) >= 1
+            has_falling_col = has_aperture_origin and (np.count_nonzero(active_falling) >= 2)
 
-            # Activate drain waterfall when upstream lid pool / top sheet is feeding the drain or particles are actively falling
+            # Activate drain waterfall when upstream lid pool / top sheet is feeding the drain or falling stream originates from aperture
             is_drain_wf = (has_drain_inflow or has_falling_col) & falling_in_col
+            all_drain_wf_mask |= is_drain_wf
 
             b_id = d_idx + 1
             body_specs.append(
@@ -1584,14 +1967,14 @@ class FluidBodyTracker:
 
         # 7. Reservoir Bowl Pools (per bowl)
         for b_idx, bowl_feat in enumerate(ctx.bowls):
-            is_bowl_pool = in_basin & (pos_act[:, 2] <= z_pool_surf)
+            is_bowl_pool = in_basin & (pos_act[:, 2] <= z_pool_surf) & (~all_drain_wf_mask)
             b_id = b_idx + 1
             body_specs.append(
                 (FluidBodyType.POOL, FluidStage.BOWL_POOL, CADFeatureType.BOWL, 2, b_id, is_bowl_pool, bowl_feat)
             )
 
         # 8. Splash Clusters (airborne droplets not part of any active waterfall)
-        is_cluster = in_basin & (pos_act[:, 2] > z_pool_surf) & (~all_drain_column_mask)
+        is_cluster = in_basin & (pos_act[:, 2] > z_pool_surf) & (~all_drain_column_mask) & (~all_drain_wf_mask)
 
         active_bodies: list[FluidBody] = []
         for b_type, stage, feat_type, tier, b_id, mask, feat_inst in body_specs:
@@ -1609,16 +1992,17 @@ class FluidBodyTracker:
                 particle_indices=indices,
                 cad_context=ctx,
             )
-            body.recompute_shape(positions, velocities, self.r_s)
+            body.recompute_shape(pos_arr, vel_arr, self.r_s)
             self.bodies[b_id if b_type != FluidBodyType.POOL else (b_id + 100)] = body
             active_bodies.append(body)
 
-        # Clusters for free splash droplets
+        # Clusters for free splash droplets: group only closely connected particles
         cluster_indices = active_indices[is_cluster]
         if len(cluster_indices) > 0:
-            cluster_subsets = cluster_particles(positions[cluster_indices], max_dist=0.020)
-            if len(cluster_subsets) > 10:
-                cluster_subsets = sorted(cluster_subsets, key=len, reverse=True)[:10]
+            cluster_max_dist = max(0.006, self.r_s * 2.5)
+            cluster_subsets = cluster_particles(pos_arr[cluster_indices], max_dist=cluster_max_dist)
+            if len(cluster_subsets) > 30:
+                cluster_subsets = sorted(cluster_subsets, key=len, reverse=True)[:30]
             for idx, c_subset in enumerate(cluster_subsets):
                 c_indices = cluster_indices[c_subset]
                 child = FluidBody(
@@ -1626,8 +2010,9 @@ class FluidBodyTracker:
                     body_type=FluidBodyType.CLUSTER,
                     stage=FluidStage.SPLASH_CLUSTER,
                     particle_indices=c_indices,
+                    cad_context=ctx,
                 )
-                child.recompute_shape(positions, velocities, self.r_s)
+                child.recompute_shape(pos_arr, vel_arr, self.r_s)
                 active_bodies.append(child)
 
         return active_bodies

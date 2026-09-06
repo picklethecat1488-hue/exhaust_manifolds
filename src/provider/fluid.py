@@ -3377,9 +3377,19 @@ class Fluid:
         if not hasattr(self, "fluid_body_tracker"):
             self.fluid_body_tracker = FluidBodyTracker(r_s=self.r_s)
 
+        pos = (
+            np.asarray(self.last_positions, dtype=np.float32)
+            if self.last_positions is not None
+            else np.zeros((0, 3), dtype=np.float32)
+        )
+        vel = (
+            np.asarray(self.last_velocities, dtype=np.float32)
+            if self.last_velocities is not None
+            else np.zeros_like(pos)
+        )
         return self.fluid_body_tracker.update_bodies(
-            self.last_positions,
-            self.last_velocities,
+            pos,
+            vel,
             cad_context=self.processed_boundaries.fluid_context,
         )
 
@@ -3906,14 +3916,18 @@ class Fluid:
         self._update_state_tracker()
         self.current_sim_time += 1.0 / 240.0
 
-    def get_water_meshes(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    def get_water_meshes(self, bodies: Optional[list[Any]] = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         """Compute watertight 3D triangle meshes for all active dynamic fluid bodies.
+
+        Args:
+            bodies: Optional list of pre-computed FluidBody instances. If None, computes bodies.
 
         Returns:
             Dictionary mapping fluid body identifier (e.g. 'pool_1', 'stream_2', 'sheet_3')
             to a tuple of (vertices_array, faces_array).
         """
-        bodies = self.get_fluid_bodies()
+        if bodies is None:
+            bodies = self.get_fluid_bodies()
         meshes = {}
         for body in bodies:
             name = body.display_name
@@ -3934,8 +3948,9 @@ class Fluid:
                 self.state_tracker.particle_colors = []
                 self.state_tracker.particle_radii = []
 
-            self.state_tracker.fluid_bodies = self.get_fluid_bodies()
-            self.state_tracker.water_meshes = self.get_water_meshes()
+            bodies = self.get_fluid_bodies()
+            self.state_tracker.fluid_bodies = bodies
+            self.state_tracker.water_meshes = self.get_water_meshes(bodies=bodies)
 
             if get_env_bool("SHOW_BOUNDARY_VOXELS", False):
                 self.state_tracker.boundary_voxels = self.get_boundary_voxels()

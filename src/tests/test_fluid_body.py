@@ -180,6 +180,8 @@ def test_fluid_body_tracker():
         dtype=np.float32,
     )
     velocities = np.zeros((13, 3), dtype=np.float32)
+    velocities[10, 2] = -0.10  # Actively falling waterfall particle
+    velocities[11, 2] = -0.10  # Actively falling waterfall particle
 
     cad_context = FluidCADContext(
         features=(
@@ -500,6 +502,7 @@ def test_cascade_tier_continuity_and_intersections():
         dtype=np.float32,
     )
     velocities = np.zeros((12, 3), dtype=np.float32)
+    velocities[7:10, 2] = -0.10  # Actively falling waterfall particles
 
     tracker = FluidBodyTracker(r_s=0.0025)
     bodies = tracker.update_bodies(positions, velocities, cad_context=ctx)
@@ -701,6 +704,7 @@ def test_direct_top_sheet_to_drain_cascade():
         dtype=np.float32,
     )
     vel = np.zeros((7, 3), dtype=np.float32)
+    vel[3:5, 2] = -0.10  # Actively falling particles
 
     tracker = FluidBodyTracker(r_s=0.0025)
     bodies = tracker.update_bodies(pos, vel, cad_context=ctx)
@@ -788,3 +792,168 @@ def test_fluid_cad_context_from_boundaries_and_urdf_metadata():
     assert len(ctx.drains) == 3
     drain_labels = {d.label for d in ctx.drains}
     assert drain_labels == {"Drain_Center", "Drain_Left", "Drain_Right"}
+
+    # Center drain must touch front lip of drinking shelf at y = terrace_y - terrace_r = -0.002
+    center_drain = ctx.get("Drain_Center")
+    assert center_drain is not None
+    assert np.isclose(center_drain.x, 0.0)
+    assert np.isclose(center_drain.y, -0.002)
+    assert center_drain.is_arc is True
+    assert np.isclose(center_drain.arc_radius, 0.030)
+
+
+def test_arc_waterfall_mesh_watertightness_and_cad_solid():
+    """Verify that curved arc waterfall generates a 100% watertight manifold mesh and valid build123d CAD solid."""
+    import trimesh
+    import math
+    from model.fluid_body import generate_arc_waterfall_mesh
+
+    # 1. Direct arc mesh generator along front lip of platform / shelf
+    verts, faces = generate_arc_waterfall_mesh(
+        arc_center_xy=(0.0, 0.028),
+        arc_radius=0.030,
+        theta_start=math.pi - 0.35,
+        theta_end=math.pi + 0.35,
+        z_top=0.105,
+        z_bot=0.045,
+        thickness=0.003,
+        n_segments=16,
+    )
+
+    assert len(verts) == 16 * 4
+    assert len(faces) > 0
+
+    # Watertightness check: every edge must appear in exactly 2 faces
+    edge_counts = {}
+    for face in faces:
+        for i in range(3):
+            e_canon = tuple(sorted((face[i], face[(i + 1) % 3])))
+            edge_counts[e_canon] = edge_counts.get(e_canon, 0) + 1
+    assert all(count == 2 for count in edge_counts.values())
+
+    # Trimesh topological validation
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+    assert mesh.is_watertight
+    assert mesh.volume > 0.0
+    assert mesh.euler_number == 2  # V - E + F = 2 for closed genus-0 manifold
+
+    # 2. FluidBody.to_mesh and FluidBody.to_cad_solid for arc waterfall
+    arc_feat = CADFeature(
+        feature_type=CADFeatureType.DRAIN,
+        label="Drain_Center",
+        x=0.0,
+        y=-0.002,
+        z=0.098,
+        r=0.008,
+        arc_center_x=0.0,
+        arc_center_y=0.028,
+        arc_radius=0.030,
+        theta_start=math.pi - 0.35,
+        theta_end=math.pi + 0.35,
+        is_arc=True,
+    )
+    wf_body = FluidBody(
+        body_id=1,
+        body_type=FluidBodyType.WATERFALL,
+        stage=FluidStage.DRAIN_WATERFALL,
+        feature_type=CADFeatureType.DRAIN,
+        cad_feature=arc_feat,
+        tier=1,
+        particle_indices=np.array([0, 1]),
+        centroid=(0.0, -0.002, 0.070),
+        bounds_min=(-0.015, -0.005, 0.045),
+        bounds_max=(0.015, 0.005, 0.105),
+        cad_context=FluidCADContext(features=(arc_feat,)),
+    )
+
+    wf_verts, wf_faces = wf_body.to_mesh()
+    assert len(wf_verts) > 0
+    assert len(wf_faces) > 0
+    wf_mesh = trimesh.Trimesh(vertices=wf_verts, faces=wf_faces)
+    assert wf_mesh.is_watertight
+    assert wf_mesh.volume > 0.0
+
+    cad_solid = wf_body.to_cad_solid()
+    assert cad_solid is not None
+    assert cad_solid.volume > 0.0
+    bbox = cad_solid.bounding_box()
+    assert bbox.min.Z >= 0.040
+    assert bbox.max.Z <= 0.110
+
+
+def test_splash_cluster_splitting_and_pool_smoothing():
+    """Verify airborne splash droplets are broken into multiple small clusters and pool mesh is smooth."""
+    import trimesh
+    from model.fluid_body import generate_heightfield_cylinder_mesh
+
+    # 1. Test splash cluster splitting for separated airborne droplets
+    positions = np.array(
+        [
+            # Pool bed particles (establishing pool surface around Z=0.045)
+            [0.0, -0.050, 0.045],
+            [0.010, -0.050, 0.045],
+            [-0.010, -0.050, 0.045],
+            [0.020, -0.050, 0.045],
+            [-0.020, -0.050, 0.045],
+            [0.030, -0.050, 0.045],
+            [-0.030, -0.050, 0.045],
+            [0.0, -0.060, 0.045],
+            [0.010, -0.060, 0.045],
+            [-0.010, -0.060, 0.045],
+            # 3 distinct airborne splash droplets in open basin separated by > 15mm
+            [0.050, -0.030, 0.060],
+            [0.050, -0.030, 0.080],
+            [-0.050, -0.030, 0.070],
+        ],
+        dtype=np.float32,
+    )
+    velocities = np.zeros((13, 3), dtype=np.float32)
+
+    cad_context = FluidCADContext(
+        features=(
+            CADFeature("Tube", x=0.0, y=0.028, z=0.041, r=0.010),
+            CADFeature("Terrace", x=0.0, y=0.028, z=0.108, r=0.030),
+            CADFeature("Drain", x=0.0, y=-0.020, z=0.098, r=0.0154),
+            CADFeature("Pocket", x=0.0, y=0.0, z=0.098, r=0.080),
+            CADFeature("Bowl", x=0.0, y=0.0, z=0.041, r=0.090),
+        )
+    )
+
+    tracker = FluidBodyTracker(r_s=0.0025)
+    bodies = tracker.update_bodies(positions, velocities, cad_context=cad_context)
+
+    # Verify that the 3 separated droplets form 3 independent splash clusters
+    splash_clusters = [b for b in bodies if b.stage == FluidStage.SPLASH_CLUSTER]
+    assert len(splash_clusters) == 3
+
+    # Each splash cluster mesh must be watertight and have bounded volume (no wild height inflation)
+    for sc in splash_clusters:
+        verts, faces = sc.to_mesh()
+        assert len(verts) > 0
+        assert len(faces) > 0
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        assert mesh.is_watertight
+        assert mesh.volume > 0.0
+        # Mesh bounding height must be compact (< 15mm for small droplets)
+        height = np.max(verts[:, 2]) - np.min(verts[:, 2])
+        assert height <= 0.015
+
+    # 2. Test pool heightfield smoothing
+    surf_pos = np.array(
+        [
+            [0.010, 0.010, 0.052],
+            [0.012, 0.010, 0.051],
+            [-0.020, 0.015, 0.048],
+        ],
+        dtype=np.float32,
+    )
+    p_verts, p_faces = generate_heightfield_cylinder_mesh(
+        radius=0.080,
+        z_floor=0.010,
+        surface_positions=surf_pos,
+        default_z_top=0.050,
+        center=(0.0, 0.0),
+    )
+    p_mesh = trimesh.Trimesh(vertices=p_verts, faces=p_faces)
+    assert p_mesh.is_watertight
+    assert p_mesh.volume > 0.0

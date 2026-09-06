@@ -24,6 +24,7 @@ pytest
 2. **Outcome Verification**: Confirm that all checks (format, lint, compile, and pytest) pass with exit code `0`.
 3. **Resolution**: If any component fails (such as syntax error, ruff failure, or failing test), you must address the failure and re-run the check before concluding your work.
 4. **Integration Smoke Tests**: The integration smoke tests (`python src/smoke.py`) are highly resource-intensive and should always be run on `anvil`.
+5. **Process Management & Rerun Hygiene**: When restarting or re-running test suites (`pytest`, `pytest -m "slow"`, `bin/anvil pytest`, `python src/smoke.py`, etc.), you MUST explicitly terminate/kill any preceding running instances of that test or task before launching a new execution. Never allow multiple overlapping runs of the same test command.
 
 ---
 
@@ -115,3 +116,4 @@ Host anvil
 ### Usage Guidelines:
 1. **Remote Execution**: Use `bin/anvil run "<command>"` or SSH targeting `ubuntu@anvil` (or `ssh anvil`) to run full test suites (`pytest`), slow physics benchmarks (`pytest -m "slow"`), large JAX SPH simulation grids, parameter sweeps, and integration smoke tests (`python src/smoke.py`).
 2. **Conda Environment & Binaries**: On `anvil`, execute commands within the `cq` conda environment using `conda run -n cq --no-capture-output <command>` (prefer relative executable names like `python`, `pytest`, `ruff` over absolute paths).
+3. **Preceding Run Cancellation**: Before initiating a new remote execution or benchmark on `anvil`, ensure any active or stale background runs of the same command are cancelled or terminated to avoid cloud resource contention and duplicate processing.
