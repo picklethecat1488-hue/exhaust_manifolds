@@ -1,5 +1,7 @@
 """Dynamic fluid body primitives and volume tracking models."""
 
+from __future__ import annotations
+
 from enum import Enum
 import math
 from typing import Any, NamedTuple, Optional, Sequence, Union
@@ -147,31 +149,13 @@ def generate_heightfield_cylinder_mesh(
             has_samples = grid_count > 0.0
             grid_z = np.where(has_samples, grid_sum_z / np.maximum(1.0, grid_count), default_z_top)
 
-            # 2D 3x3 smoothing pass across grid_z for organic, ripple-smoothed pool surface
-            kernel_center = 0.50
-            kernel_cardinal = 0.09
-            kernel_diagonal = 0.035
-            smoothed_z = np.copy(grid_z)
-            for i in range(nx):
-                i_prev = max(0, i - 1)
-                i_next = min(nx - 1, i + 1)
-                for j in range(ny):
-                    j_prev = max(0, j - 1)
-                    j_next = min(ny - 1, j + 1)
-                    val = (
-                        kernel_center * grid_z[i, j]
-                        + kernel_cardinal
-                        * (grid_z[i_prev, j] + grid_z[i_next, j] + grid_z[i, j_prev] + grid_z[i, j_next])
-                        + kernel_diagonal
-                        * (
-                            grid_z[i_prev, j_prev]
-                            + grid_z[i_prev, j_next]
-                            + grid_z[i_next, j_prev]
-                            + grid_z[i_next, j_next]
-                        )
-                    )
-                    smoothed_z[i, j] = val
-            grid_z = smoothed_z
+            # Vectorized 2D 3x3 smoothing pass across grid_z for organic, ripple-smoothed pool surface
+            pad = np.pad(grid_z, 1, mode="edge")
+            grid_z = (
+                0.50 * pad[1:-1, 1:-1]
+                + 0.09 * (pad[:-2, 1:-1] + pad[2:, 1:-1] + pad[1:-1, :-2] + pad[1:-1, 2:])
+                + 0.035 * (pad[:-2, :-2] + pad[:-2, 2:] + pad[2:, :-2] + pad[2:, 2:])
+            )
 
     def sample_z(x_arr: np.ndarray, y_arr: np.ndarray) -> np.ndarray:
         gx = (x_arr - x_min) / dx - 0.5
@@ -567,6 +551,88 @@ def generate_arc_waterfall_mesh(
 
     faces_arr = np.array(faces, dtype=np.uint32)
     return vertices_arr, faces_arr
+
+
+_LID_POCKET_TEMPLATE_CACHE: dict[Any, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def generate_lid_pocket_mesh(
+    pos: tuple[float, float, float],
+    radius: float,
+    height: float,
+    ctx: Optional[FluidCADContext] = None,
+    deflection: float = 0.0005,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a watertight 3D annular lid pocket mesh cutting out terrace and drain apertures with template caching."""
+    terraces_tuple = ()
+    cutouts_tuple = ()
+    drains_tuple = ()
+    if ctx is not None:
+        terraces_tuple = tuple((round(float(t.x), 4), round(float(t.y), 4), round(float(t.r), 4)) for t in ctx.terraces)
+        cutouts_tuple = tuple((round(float(c.x), 4), round(float(c.y), 4), round(float(c.r), 4)) for c in ctx.cutouts)
+        if len(cutouts_tuple) == 0:
+            drains_tuple = tuple(
+                (round(float(d.x), 4), round(float(d.y), 4), round(float(d.r), 4)) for d in ctx.drains if d.r > 0.020
+            )
+
+    cache_key = (
+        round(float(pos[0]), 4),
+        round(float(pos[1]), 4),
+        round(float(radius), 4),
+        terraces_tuple,
+        cutouts_tuple,
+        drains_tuple,
+    )
+
+    if cache_key not in _LID_POCKET_TEMPLATE_CACHE:
+        from build123d import Align, BuildPart, Cylinder, Locations, Mode
+
+        unit_h = 1.0
+        with BuildPart() as bp:
+            Cylinder(radius=radius, height=unit_h, align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.ADD)
+            if ctx is not None:
+                for terrace in ctx.terraces:
+                    if terrace.r > 0.0:
+                        with Locations((terrace.x - pos[0], terrace.y - pos[1], 0.0)):
+                            Cylinder(
+                                radius=terrace.r,
+                                height=unit_h * 3.0,
+                                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+                                mode=Mode.SUBTRACT,
+                            )
+                for cutout in ctx.cutouts:
+                    if cutout.r > 0.0:
+                        with Locations((cutout.x - pos[0], cutout.y - pos[1], 0.0)):
+                            Cylinder(
+                                radius=cutout.r,
+                                height=unit_h * 3.0,
+                                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+                                mode=Mode.SUBTRACT,
+                            )
+                if len(ctx.cutouts) == 0:
+                    for drain in ctx.drains:
+                        if drain.r > 0.020:
+                            with Locations((drain.x - pos[0], drain.y - pos[1], 0.0)):
+                                Cylinder(
+                                    radius=drain.r,
+                                    height=unit_h * 3.0,
+                                    align=(Align.CENTER, Align.CENTER, Align.CENTER),
+                                    mode=Mode.SUBTRACT,
+                                )
+        verts, triangles = bp.part.tessellate(deflection)
+        if len(verts) > 0 and len(triangles) > 0:
+            unit_verts = np.array([[v.X + pos[0], v.Y + pos[1], v.Z] for v in verts], dtype=np.float32)
+            faces_arr = np.array(triangles, dtype=np.uint32)
+            _LID_POCKET_TEMPLATE_CACHE[cache_key] = (unit_verts, faces_arr)
+        else:
+            return generate_heightfield_cylinder_mesh(
+                radius=radius, z_floor=pos[2], default_z_top=pos[2] + height, center=(pos[0], pos[1])
+            )
+
+    unit_verts, faces_arr = _LID_POCKET_TEMPLATE_CACHE[cache_key]
+    out_verts = unit_verts.copy()
+    out_verts[:, 2] = pos[2] + out_verts[:, 2] * height
+    return out_verts, faces_arr
 
 
 class FluidBodyType(str, Enum):
@@ -1063,30 +1129,14 @@ class FluidBody(BaseModel):
                 ry = (self.bounds_max[1] - self.bounds_min[1]) / 2.0
                 radius = max(0.010, (rx + ry) / 2.0)
                 if self.feature_type == CADFeatureType.POCKET or self.tier == 1 or self.stage == FluidStage.LID_POOL:
-                    solid = self.to_cad_solid()
-                    if hasattr(solid, "tessellate"):
-                        verts, triangles = solid.tessellate(0.0005)
-                        if len(verts) > 0 and len(triangles) > 0:
-                            verts_arr = np.array([[v.X, v.Y, v.Z] for v in verts], dtype=np.float32)
-                            faces_arr = np.array(triangles, dtype=np.uint32)
-                            return verts_arr, faces_arr
-
-                    center = (feat.x, feat.y) if feat is not None else (0.0, 0.0)
-                    z_floor_val = ctx.z_lid if ctx is not None and ctx.z_lid > 0.0 else z_min
-                    z_top_val = min(
-                        feat.z if feat is not None and feat.z > 0.0 else (z_floor_val + 0.010),
-                        max(z_max, z_floor_val + 0.003),
+                    pos = (
+                        feat.x if feat is not None else 0.0,
+                        feat.y if feat is not None else 0.0,
+                        ctx.z_lid if ctx is not None and ctx.z_lid > 0.0 else z_min,
                     )
                     radius = feat.r if feat is not None and feat.r > 0.0 else radius
-                    return generate_heightfield_cylinder_mesh(
-                        radius=radius,
-                        z_floor=z_floor_val,
-                        surface_positions=self.surface_positions,
-                        default_z_top=z_top_val,
-                        center=center,
-                        n_rings=6,
-                        n_spokes=n_segments,
-                    )
+                    h = max(0.002, min(0.008, z_max - pos[2]))
+                    return generate_lid_pocket_mesh(pos=pos, radius=radius, height=h, ctx=ctx)
                 else:
                     center = (feat.x, feat.y) if feat is not None else (0.0, 0.0)
                     z_floor_val = ctx.z_floor if ctx is not None and ctx.z_floor > 0.0 else z_min
