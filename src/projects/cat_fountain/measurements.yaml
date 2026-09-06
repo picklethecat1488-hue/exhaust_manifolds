@@ -8,6 +8,10 @@ floor_z: 41.0
 target_volume: 0.0010
 bottom_cover_clearance: 0.2
 bottom_cover_drain_radius: 8.0
+rubber_feet_count: 4
+rubber_feet_radius: 5.5
+rubber_feet_depth: 1.0
+rubber_feet_pitch_radius: 78.0
 drain_hole_radius: 15.4
 drain_hole_y: 65.0
 drain_shroud_height: 15.0
@@ -51,7 +55,9 @@ tube_lid_clearance: 0.1
 impeller_radius: 9.0
 impeller_height: 68.0
 impeller_shaft_radius: 2.5
-impeller_sleeve_height: 4.0
+impeller_shaft_clearance: 0.30
+impeller_base_height: 6.0
+impeller_sleeve_height: 10.0
 impeller_blades: 6
 impeller_clearance: 0.4
 vane_twist: -15.0
@@ -158,14 +164,25 @@ magnet_ring_radius: 9.0
 pump_well_depth: 10.0
 pump_well_wall: 1.5
 pump_inlet_radius: 6.0
+pump_inlet_width: 12.0
+pump_inlet_height: 5.0
+pump_cover_height: 6.0
+pump_cover_sleeve_height: 8.0
+pump_cover_tube_clearance: 0.35
+pump_cover_snap_clearance: 0.45
+pump_cover_internal_clearance: 0.40
+pump_cover_clip_opening_width: 14.8
 pump_outlet_radius: 4.0      # 8mm inner diameter (10mm OD)
 pump_casing_clearance: 1.0
 
 # ==========================================
 # 11. Drive Hub Recess & Motor Clip Assembly
 # ==========================================
+drive_hub_shaft_radius: 0.85
 drive_hub_recess_radius: 17.0
 drive_hub_recess_depth: 5.3
+drive_hub_standoff_radius: 2.5
+drive_hub_standoff_height: 0.8
 bottom_cover_opening_width: 20.0
 motor_clip_width: 17.6
 motor_clip_thickness: 1.6
