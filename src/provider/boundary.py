@@ -6,6 +6,7 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import pybullet as p
 from model.boundary_config import BoundaryConfig, BoundaryParam, ShapeType, BoundaryType, LinkType
+from model.fluid_body import CADFeature, CADFeatureType, FluidCADContext
 
 
 def _is_real_physics_client(physics_client: Any) -> bool:
@@ -395,6 +396,11 @@ class ProcessedBoundaries:
         if self.base_idx >= 0 and self.base_idx < len(self.b_params):
             return float(self.b_params[self.base_idx, BoundaryParam.HEIGHT])
         return 0.0
+
+    @property
+    def fluid_context(self) -> FluidCADContext:
+        """Construct dynamic CAD geometry boundaries context for multi-tier fluid simulation tracking."""
+        return FluidCADContext.from_processed_boundaries(self)
 
     @property
     def tube_idx(self) -> int:

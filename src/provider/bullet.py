@@ -57,6 +57,8 @@ class BulletStateTracker:
         self.transforms: dict[str, tuple[list[float], list[float]]] = {}
         self.particle_positions: list[list[float]] = []
         self.boundary_voxels: Optional[dict[str, Any]] = None
+        self.fluid_bodies: Optional[list[Any]] = None
+        self.water_meshes: Optional[dict[str, tuple[np.ndarray, np.ndarray]]] = None
         self._last_checked_num_bodies = 0
         self.has_fluid_simulator = False
 
@@ -562,6 +564,7 @@ class Bullet:
                                 particle_colors,
                                 particle_radii,
                                 boundary_voxels,
+                                water_meshes,
                                 step_idx,
                             ) = item
                             self.room._log_rerun(
@@ -570,6 +573,7 @@ class Bullet:
                                 particle_colors,
                                 particle_radii=particle_radii,
                                 boundary_voxels=boundary_voxels,
+                                water_meshes=water_meshes,
                                 step_idx=step_idx,
                             )
                             q.task_done()
@@ -602,6 +606,7 @@ class Bullet:
                                     state_tracker.particle_colors,
                                     state_tracker.particle_radii,
                                     state_tracker.boundary_voxels,
+                                    state_tracker.water_meshes,
                                     step_idx,
                                 )
                             )

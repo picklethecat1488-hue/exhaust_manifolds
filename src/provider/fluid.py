@@ -32,6 +32,7 @@ from model import (
     BoundaryParam,
     FluidBody,
     FluidBodyType,
+    FluidStage,
     FluidBodyTracker,
 )
 from provider.transforms import (
@@ -1217,6 +1218,9 @@ def _compute_dynamic_fluid_bodies_jax(
     cavity_floor_z: float = 0.0,
     z_max_pool: float = 0.0,
     r_s: float = 0.003,
+    c_center: float = 4.0,
+    c_neighbor: float = 2.0,
+    c_diagonal: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Dynamically recompute physical fluid bodies, local column surface heights, and horizontal leveling gradients."""
     gp = (pos_local - origin) / dx
@@ -1231,13 +1235,21 @@ def _compute_dynamic_fluid_bodies_jax(
     min_z_grid = jnp.full((nx, ny), 10.0).at[ix, iy].min(jnp.where(in_basin, pos_local[:, 2], 10.0))
     col_count = jnp.zeros((nx, ny), dtype=jnp.float32).at[ix, iy].add(jnp.where(in_basin, 1.0, 0.0))
 
-    # 2. Dynamic 2D surface gradient for horizontal hydrostatic leveling
+    # 2. Dynamic 2D spatial surface smoothing and horizontal hydrostatic leveling gradient
     surf_pad = jnp.pad(surf_z_grid, ((1, 1), (1, 1)), mode="edge")
-    grad_x = (surf_pad[2:, 1:-1] - surf_pad[:-2, 1:-1]) / (2.0 * dx)
-    grad_y = (surf_pad[1:-1, 2:] - surf_pad[1:-1, :-2]) / (2.0 * dx)
+    w_norm = c_center + 4.0 * c_neighbor + 4.0 * c_diagonal
+    surf_smooth = (
+        c_center * surf_pad[1:-1, 1:-1]
+        + c_neighbor * (surf_pad[2:, 1:-1] + surf_pad[:-2, 1:-1] + surf_pad[1:-1, 2:] + surf_pad[1:-1, :-2])
+        + c_diagonal * (surf_pad[2:, 2:] + surf_pad[:-2, :-2] + surf_pad[2:, :-2] + surf_pad[:-2, 2:])
+    ) / jnp.maximum(1e-4, w_norm)
+
+    smooth_pad = jnp.pad(surf_smooth, ((1, 1), (1, 1)), mode="edge")
+    grad_x = (smooth_pad[2:, 1:-1] - smooth_pad[:-2, 1:-1]) / (2.0 * dx)
+    grad_y = (smooth_pad[1:-1, 2:] - smooth_pad[1:-1, :-2]) / (2.0 * dx)
 
     # 3. Sample back to particle coordinates
-    p_surf_z = surf_z_grid[ix, iy]
+    p_surf_z = surf_smooth[ix, iy]
     p_min_z = min_z_grid[ix, iy]
     p_grad_x = grad_x[ix, iy]
     p_grad_y = grad_y[ix, iy]
@@ -1837,10 +1849,11 @@ def _compute_particle_forces_subroutine(
         pos_b, dx, origin, nx, ny, nz, cavity_floor_z=cavity_floor_z, z_max_pool=z_max_pool, r_s=r_s
     )
 
-    # 1. Dynamic hydrostatic support and vertical column pressure
+    # 1. Dynamic hydrostatic support, vertical wave damping, and impact deceleration for smooth pool water
     depth_pressure = jnp.clip((p_surf_z - pos_b[:, 2]) / (4.0 * r_s), 0.0, 4.0)
-    cushion_accel_z = -jnp.minimum(v_z_b, 0.0) * 35.0
-    total_support_z = g_mag * (1.0 + depth_pressure * 0.35) + cushion_accel_z
+    cushion_accel_z = -jnp.minimum(v_z_b, 0.0) * 25.0  # Decelerate falling waterfall droplets
+    vertical_wave_damping_z = -v_z_b * 8.0  # Viscous vertical damping arresting sloshing oscillations
+    total_support_z = g_mag * (1.0 + depth_pressure * 0.25) + cushion_accel_z + vertical_wave_damping_z
 
     hydrostatic_support_world = local_to_world_vector(
         jnp.stack([jnp.zeros_like(r_b), jnp.zeros_like(r_b), total_support_z], axis=-1),
@@ -1852,8 +1865,9 @@ def _compute_particle_forces_subroutine(
         0.0,
     )
 
-    # 2. Dynamic horizontal leveling gradient derived continuously from the moving surface height field
-    level_accel_world = local_to_world_vector(level_grad_local * (g_mag * 0.40), base_orn_b)
+    # 2. Dynamic horizontal leveling gradient derived continuously from the smoothed surface height field
+    level_grad_damped = level_grad_local * (g_mag * 0.40) - v_b * 1.5
+    level_accel_world = local_to_world_vector(level_grad_damped, base_orn_b)
     leveling_accel = jnp.where(
         in_fluid_body[:, None],
         level_accel_world,
@@ -3057,6 +3071,9 @@ class Fluid:
         self.min_distance_threshold = config.min_distance_threshold
         self.stiffness_boundary = config.stiffness_boundary
         self.damping_boundary = config.damping_boundary
+        self.surface_smooth_center_coeff = config.surface_smooth_center_coeff
+        self.surface_smooth_neighbor_coeff = config.surface_smooth_neighbor_coeff
+        self.surface_smooth_diagonal_coeff = config.surface_smooth_diagonal_coeff
 
         self.volume_threshold_liters = config.volume_threshold_liters
         self.fallen_threshold_liters = config.fallen_threshold_liters
@@ -3359,19 +3376,11 @@ class Fluid:
         """
         if not hasattr(self, "fluid_body_tracker"):
             self.fluid_body_tracker = FluidBodyTracker(r_s=self.r_s)
-        z_offset = self.processed_boundaries.cavity_z_offset
-        lid_b = self.processed_boundaries.lid
-        tube_b = self.processed_boundaries.tube_wall
-        z_lid = lid_b.z_floor if lid_b is not None else self.processed_boundaries.cavity_height
-        tube_y = tube_b.pos[1] if tube_b is not None else (lid_b.tube_y if lid_b is not None else 0.0)
-        tube_r = tube_b.inner_radius if tube_b is not None else (lid_b.tube_r if lid_b is not None else 0.0)
+
         return self.fluid_body_tracker.update_bodies(
             self.last_positions,
             self.last_velocities,
-            z_floor=z_offset,
-            z_lid=z_lid,
-            tube_y=tube_y,
-            tube_r=tube_r,
+            cad_context=self.processed_boundaries.fluid_context,
         )
 
     def get_boundary_voxels(self) -> dict[str, np.ndarray]:
@@ -3897,12 +3906,37 @@ class Fluid:
         self._update_state_tracker()
         self.current_sim_time += 1.0 / 240.0
 
+    def get_water_meshes(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Compute watertight 3D triangle meshes for all active dynamic fluid bodies.
+
+        Returns:
+            Dictionary mapping fluid body identifier (e.g. 'pool_1', 'stream_2', 'sheet_3')
+            to a tuple of (vertices_array, faces_array).
+        """
+        bodies = self.get_fluid_bodies()
+        meshes = {}
+        for body in bodies:
+            name = body.display_name
+            verts, faces = body.to_mesh()
+            if len(verts) > 0 and len(faces) > 0:
+                meshes[name] = (verts, faces)
+        return meshes
+
     def _update_state_tracker(self) -> None:
-        """Synchronize particle positions, colors, radii, and boundary voxels to state tracker."""
+        """Synchronize particle positions, colors, radii, water meshes, and boundary voxels to state tracker."""
         if self.state_tracker is not None:
-            self.state_tracker.particle_positions = self.get_particle_positions()
-            self.state_tracker.particle_colors = self.get_particle_colors()
-            self.state_tracker.particle_radii = self.get_particle_radii()
+            if get_env_bool("SHOW_WATER_VOXELS", False):
+                self.state_tracker.particle_positions = self.get_particle_positions()
+                self.state_tracker.particle_colors = self.get_particle_colors()
+                self.state_tracker.particle_radii = self.get_particle_radii()
+            else:
+                self.state_tracker.particle_positions = []
+                self.state_tracker.particle_colors = []
+                self.state_tracker.particle_radii = []
+
+            self.state_tracker.fluid_bodies = self.get_fluid_bodies()
+            self.state_tracker.water_meshes = self.get_water_meshes()
+
             if get_env_bool("SHOW_BOUNDARY_VOXELS", False):
                 self.state_tracker.boundary_voxels = self.get_boundary_voxels()
             else:
