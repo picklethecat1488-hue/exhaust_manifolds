@@ -1235,8 +1235,14 @@ def _compute_dynamic_fluid_bodies_jax(
     min_z_grid = jnp.full((nx, ny), 10.0).at[ix, iy].min(jnp.where(in_basin, pos_local[:, 2], 10.0))
     col_count = jnp.zeros((nx, ny), dtype=jnp.float32).at[ix, iy].add(jnp.where(in_basin, 1.0, 0.0))
 
+    # Inpaint empty cells with mean basin surface height to prevent false hole step artifacts in gradient
+    n_basin_pts = jnp.maximum(1.0, jnp.sum(jnp.where(in_basin, 1.0, 0.0)))
+    z_mean_basin = jnp.maximum(cavity_floor_z, jnp.sum(jnp.where(in_basin, pos_local[:, 2], 0.0)) / n_basin_pts)
+    has_samples = col_count > 0.0
+    surf_z_infilled = jnp.where(has_samples, surf_z_grid, z_mean_basin)
+
     # 2. Dynamic 2D spatial surface smoothing and horizontal hydrostatic leveling gradient
-    surf_pad = jnp.pad(surf_z_grid, ((1, 1), (1, 1)), mode="edge")
+    surf_pad = jnp.pad(surf_z_infilled, ((1, 1), (1, 1)), mode="edge")
     w_norm = c_center + 4.0 * c_neighbor + 4.0 * c_diagonal
     surf_smooth = (
         c_center * surf_pad[1:-1, 1:-1]
@@ -1617,11 +1623,11 @@ def _compute_particle_forces_subroutine(
         dir_casing = d_in / dist_in
         dir_world = local_to_world_vector(dir_casing, casing_orn)
 
-        d_in_xy = jnp.sqrt((pos_casing[:, 0] - intake_pos_i[0]) ** 2 + (pos_casing[:, 1] - intake_pos_i[1]) ** 2)
+        dist_in_to_port = jnp.sqrt(jnp.sum((pos_casing - intake_pos_i) ** 2, axis=-1))
         in_suction = (
             has_intake_i
-            & (d_in_xy <= inlet_r_eff + 0.015)
-            & (pos_casing[:, 2] >= casing_h - 0.002)
+            & (dist_in_to_port <= inlet_r_eff + 0.025)
+            & (pos_casing[:, 2] >= -0.002)
             & (pos_casing[:, 2] <= casing_h + 0.030)
         )
         suction_strength = (v_tip * 2.0 + g_mag * 1.5) * jnp.clip(1.0 - dist_in / (inlet_r_eff + 0.025), 0.0, 1.0)
@@ -1852,27 +1858,24 @@ def _compute_particle_forces_subroutine(
     # 1. Dynamic hydrostatic support, vertical wave damping, and impact deceleration for smooth pool water
     depth_pressure = jnp.clip((p_surf_z - pos_b[:, 2]) / (4.0 * r_s), 0.0, 4.0)
     cushion_accel_z = -jnp.minimum(v_z_b, 0.0) * 25.0  # Decelerate falling waterfall droplets
-    vertical_wave_damping_z = -v_z_b * 8.0  # Viscous vertical damping arresting sloshing oscillations
+    vertical_wave_damping_z = -v_z_b * 35.0  # Viscous vertical damping arresting sloshing oscillations
     total_support_z = g_mag * (1.0 + depth_pressure * 0.25) + cushion_accel_z + vertical_wave_damping_z
+
+    # Continuous C1 surface taper preventing bang-bang force switching at the free surface
+    s_taper = jnp.clip(1.0 - (pos_b[:, 2] - p_surf_z) / (2.0 * r_s), 0.0, 1.0)
+    s_surf_taper = s_taper * s_taper * (3.0 - 2.0 * s_taper)
+    support_scale = jnp.where(in_fluid_body, s_surf_taper, 0.0)
 
     hydrostatic_support_world = local_to_world_vector(
         jnp.stack([jnp.zeros_like(r_b), jnp.zeros_like(r_b), total_support_z], axis=-1),
         base_orn_b,
     )
-    hydrostatic_accel = jnp.where(
-        in_fluid_body[:, None],
-        hydrostatic_support_world,
-        0.0,
-    )
+    hydrostatic_accel = support_scale[:, None] * hydrostatic_support_world
 
     # 2. Dynamic horizontal leveling gradient derived continuously from the smoothed surface height field
-    level_grad_damped = level_grad_local * (g_mag * 0.40) - v_b * 1.5
+    level_grad_damped = level_grad_local * (g_mag * 0.15) - v_b * 1.5
     level_accel_world = local_to_world_vector(level_grad_damped, base_orn_b)
-    leveling_accel = jnp.where(
-        in_fluid_body[:, None],
-        level_accel_world,
-        0.0,
-    )
+    leveling_accel = support_scale[:, None] * level_accel_world
 
     # 3. Dynamic replenishment draw toward active pump intake sink:
     # When water is intaked into the pump system, surrounding reservoir fluid near the casing
@@ -1918,7 +1921,6 @@ def _ccd_planar_shelf_boundary(
     pos_next_loc: jnp.ndarray,
     v_rel_local: jnp.ndarray,
     z_plane: float,
-    normal_sign: float,
     radius: float,
     shelf_depth: float,
     has_drain: jnp.ndarray,
@@ -2298,7 +2300,6 @@ def _apply_boundary_ccd_subroutine(
             pos_lid_next,
             v_lid_k,
             z_plane=0.0,
-            normal_sign=1.0,
             radius=b_params[k, BoundaryParam.RADIUS],
             shelf_depth=b_params[k, BoundaryParam.SHELF_DEPTH],
             has_drain=b_params[k, BoundaryParam.HAS_DRAIN] > 0.5,
@@ -2474,7 +2475,6 @@ def _integrate_particles_subroutine(
         pos_local_next,
         v_rel_local,
         z_plane=cavity_floor_z,
-        normal_sign=1.0,
         radius=base_radius,
         shelf_depth=0.020,
         has_drain=jnp.bool_(False),

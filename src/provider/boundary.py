@@ -636,7 +636,7 @@ class BoundaryProcessor:
         if has_sph:
             sph_idx = [idx for idx, b in enumerate(boundary_list) if b.shape == ShapeType.SPHERE][0]
             sph_top_z = b_pos_list[sph_idx][2] - base_pos[2] + float(boundary_list[sph_idx].radius) + 0.002
-            max_ceiling_z = sph_top_z
+            max_ceiling_z = max(fountain_top_z, sph_top_z)
         else:
             max_ceiling_z = fountain_top_z
 
