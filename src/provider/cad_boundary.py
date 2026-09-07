@@ -3,7 +3,7 @@
 import math
 from typing import Any, Optional
 import build123d as b3d
-from model.boundary_config import BoundaryType, ShapeType, BoundaryCADConformance
+from model.boundary_config import BoundaryType, ShapeType, BoundaryCADConformance, LinkType
 from .room import Room
 
 
@@ -282,3 +282,273 @@ def validate_room_urdf_boundaries(
                     raise ValueError(f"Part {part_name} cavity boundary {conf.shape} has non-positive volume")
 
     return conformance_results
+
+
+def extract_boundary_from_cad(
+    part: Any,
+    shape: Optional[ShapeType] = None,
+    type: Optional[BoundaryType] = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """
+    Extract analytical URDF boundary configuration parameters directly from a CAD part, solid, or compound.
+
+    Inspects B-Rep face topology (cylinders, spheres, planes), bounding box bounds, center locations,
+    and attached port joints (intake, drain, tube).
+
+    Args:
+        part: build123d Part, Solid, Compound, or Shape instance.
+        shape: Optional explicit ShapeType. If None, derived from B-Rep face topology.
+        type: Optional BoundaryType (e.g. SOLID, CAVITY, SOLID_CAVITY).
+        **overrides: Optional parameter overrides that take precedence over CAD-derived defaults.
+
+    Returns:
+        Dictionary of boundary configuration parameters ready for BoundaryConfig validation.
+    """
+    # 1. Resolve solid geometry
+    if hasattr(part, "part") and part.part is not None:
+        solid = part.part
+    elif hasattr(part, "solid") and callable(part.solid) and part.solid() is not None:
+        solid = part.solid()
+    else:
+        solid = part
+
+    # 2. Query bounding box
+    solid_any: Any = solid
+    bbox = solid_any.bounding_box()
+    dx = bbox.max.X - bbox.min.X
+    dy = bbox.max.Y - bbox.min.Y
+    dz = bbox.max.Z - bbox.min.Z
+
+    center_x = (bbox.max.X + bbox.min.X) * 0.5
+    center_y = (bbox.max.Y + bbox.min.Y) * 0.5
+    center_z = (bbox.max.Z + bbox.min.Z) * 0.5
+
+    # 3. Query B-Rep faces if available
+    cyl_faces = []
+    sph_faces = []
+    plane_faces = []
+    if hasattr(solid, "faces") and callable(solid.faces):
+        faces_list = solid.faces()
+        if hasattr(faces_list, "filter_by"):
+            cyl_faces = list(faces_list.filter_by(b3d.GeomType.CYLINDER))
+            sph_faces = list(faces_list.filter_by(b3d.GeomType.SPHERE))
+            plane_faces = list(faces_list.filter_by(b3d.GeomType.PLANE))
+        else:
+            cyl_faces = [f for f in faces_list if getattr(f, "geom_type", None) == b3d.GeomType.CYLINDER]
+            sph_faces = [f for f in faces_list if getattr(f, "geom_type", None) == b3d.GeomType.SPHERE]
+            plane_faces = [f for f in faces_list if getattr(f, "geom_type", None) == b3d.GeomType.PLANE]
+
+    # 4. Infer shape type if not explicitly provided
+    if shape is None:
+        if len(sph_faces) > 0 and len(cyl_faces) == 0:
+            shape = ShapeType.SPHERE
+        elif len(cyl_faces) > 0:
+            shape = ShapeType.CYLINDER
+        elif abs(dx - dy) < 1e-3 and max(dx, dy) > 0.0:
+            shape = ShapeType.CYLINDER
+        else:
+            shape = ShapeType.BOX
+
+    default_radius = 0.0
+    default_height = 0.0
+    default_thickness = 0.0
+    default_xyz = (0.0, 0.0, 0.0)
+
+    match shape:
+        case ShapeType.CYLINDER | ShapeType.TUBE | ShapeType.CASING | ShapeType.IMPELLER:
+            radii = [float(f.radius) * 0.001 for f in cyl_faces if hasattr(f, "radius") and f.radius is not None]
+            if radii:
+                radii.sort()
+                default_radius = radii[-1]
+                default_thickness = float(max(0.0, radii[-1] - radii[0])) if len(radii) > 1 else 0.0
+            else:
+                default_radius = float(max(dx, dy) / 2.0 * 0.001)
+                default_thickness = 0.0
+
+            z_planar = [
+                float(f.center().Z) * 0.001 for f in plane_faces if hasattr(f, "center") and f.center() is not None
+            ]
+            if z_planar:
+                z_min = min(z_planar)
+                z_max = max(z_planar)
+                default_height = max(0.0, z_max - z_min)
+                default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(z_min))
+            else:
+                default_height = float(dz * 0.001)
+                default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(bbox.min.Z * 0.001))
+
+        case ShapeType.SPHERE:
+            sph_radii = [float(f.radius) * 0.001 for f in sph_faces if hasattr(f, "radius") and f.radius is not None]
+            if sph_radii:
+                sph_radii.sort()
+                default_radius = sph_radii[-1]
+                default_thickness = float(max(0.0, sph_radii[-1] - sph_radii[0])) if len(sph_radii) > 1 else 0.0
+            else:
+                default_radius = float(max(dx, dy, dz) / 2.0 * 0.001)
+                default_thickness = 0.0
+            default_height = float(dz * 0.001)
+            default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(center_z * 0.001))
+
+        case ShapeType.BOX:
+            default_radius = 0.0
+            default_thickness = 0.0
+            default_height = float(dz * 0.001)
+            default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(bbox.min.Z * 0.001))
+
+        case ShapeType.PLANE:
+            default_radius = float(max(dx, dy) / 2.0 * 0.001)
+            default_thickness = float(dz * 0.001)
+            default_height = 0.0
+            default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(bbox.min.Z * 0.001))
+
+    # 5. Extract rotation / orientation
+    solid_location = getattr(solid, "location", None)
+    if solid_location is not None:
+        trsf = solid_location.wrapped.Transformation().VectorialPart()
+        m = [
+            [trsf.Value(1, 1), trsf.Value(1, 2), trsf.Value(1, 3)],
+            [trsf.Value(2, 1), trsf.Value(2, 2), trsf.Value(2, 3)],
+            [trsf.Value(3, 1), trsf.Value(3, 2), trsf.Value(3, 3)],
+        ]
+        sin_theta = -m[2][0]
+        sin_theta = max(-1.0, min(1.0, sin_theta))
+        theta = math.asin(sin_theta)
+        if abs(math.cos(theta)) > 1e-6:
+            phi = math.atan2(m[2][1], m[2][2])
+            psi = math.atan2(m[1][0], m[0][0])
+        else:
+            phi = math.atan2(-m[1][2], m[1][1])
+            psi = 0.0
+        default_rpy = (float(phi), float(theta), float(psi))
+    else:
+        default_rpy = (0.0, 0.0, 0.0)
+
+    # 6. Extract joint ports (intake, drain, tube) attached to part or solid
+    joint_params: dict[str, Any] = {}
+    part_joints = getattr(part, "joints", None) or getattr(solid, "joints", None)
+    if part_joints and isinstance(part_joints, dict):
+        for j_name, j_obj in part_joints.items():
+            name_lower = str(j_name).lower()
+            j_loc = getattr(j_obj, "location", None) or getattr(j_obj, "local_location", None)
+            if j_loc is None:
+                continue
+            pos_m = (
+                float(j_loc.position.X * 0.001),
+                float(j_loc.position.Y * 0.001),
+                float(j_loc.position.Z * 0.001),
+            )
+            trsf = j_loc.wrapped.Transformation().VectorialPart()
+            norm_m = (
+                float(trsf.Value(1, 3)),
+                float(trsf.Value(2, 3)),
+                float(trsf.Value(3, 3)),
+            )
+
+            if "intake" in name_lower and "intake_pos" not in overrides:
+                joint_params["has_intake"] = True
+                joint_params["intake_pos"] = pos_m
+                joint_params["intake_normal"] = norm_m
+                if hasattr(j_obj, "radius") and j_obj.radius is not None and "intake_radius" not in overrides:
+                    joint_params["intake_radius"] = float(j_obj.radius)
+            elif "drain" in name_lower and "drain_pos" not in overrides:
+                joint_params["has_drain"] = True
+                joint_params["drain_pos"] = pos_m
+                joint_params["drain_normal"] = norm_m
+                if hasattr(j_obj, "radius") and j_obj.radius is not None and "drain_radius" not in overrides:
+                    joint_params["drain_radius"] = float(j_obj.radius)
+            elif ("tube" in name_lower or "spout" in name_lower) and "tube_pos" not in overrides:
+                joint_params["has_tube"] = True
+                joint_params["tube_pos"] = pos_m
+                joint_params["tube_normal"] = norm_m
+                if hasattr(j_obj, "radius") and j_obj.radius is not None and "tube_radius" not in overrides:
+                    joint_params["tube_radius"] = float(j_obj.radius)
+            elif (
+                "shelf" in name_lower or "seat" in name_lower or "pocket" in name_lower
+            ) and "shelf_depth" not in overrides:
+                if pos_m[2] > 0.0 and default_height > pos_m[2]:
+                    joint_params["shelf_depth"] = float(default_height - pos_m[2])
+                else:
+                    joint_params["shelf_depth"] = float(abs(pos_m[2])) if abs(pos_m[2]) > 0.0 else default_thickness
+
+            for slot_attr in ["slot_height", "slot_width", "cutoff_y", "ceiling_thickness"]:
+                if hasattr(j_obj, slot_attr) and getattr(j_obj, slot_attr) is not None and slot_attr not in overrides:
+                    joint_params[slot_attr] = float(getattr(j_obj, slot_attr))
+
+    # 7. Auto-derive shelf_depth from cylinder wall/floor thickness if not otherwise specified
+    if shape == ShapeType.CYLINDER and "shelf_depth" not in overrides and "shelf_depth" not in joint_params:
+        eff_thick = overrides.get("thickness", default_thickness)
+        if eff_thick is not None and float(eff_thick) > 0.0:
+            joint_params["shelf_depth"] = float(eff_thick)
+
+    # 7. Check for secondary off-center cylinder faces (e.g. integrated tube column in base reservoir)
+    if (
+        shape == ShapeType.CYLINDER
+        and "has_tube" not in joint_params
+        and "has_tube" not in overrides
+        and overrides.get("link_type") == LinkType.BASE
+    ):
+        for f in cyl_faces:
+            if hasattr(f, "radius") and f.radius is not None:
+                c = f.center()
+                dist_xy = math.sqrt(c.X * c.X + c.Y * c.Y) * 0.001
+                r_f = float(f.radius) * 0.001
+                if dist_xy > 0.010 and r_f < 0.020:
+                    joint_params["has_tube"] = True
+                    joint_params["tube_pos"] = (float(c.X * 0.001), float(c.Y * 0.001), float(default_xyz[2]))
+                    joint_params["tube_normal"] = (0.0, 0.0, 1.0)
+                    if "tube_radius" not in overrides and "tube_radius" not in joint_params:
+                        joint_params["tube_radius"] = r_f
+                    break
+
+    # 8. Extract direct shape/part instance metadata attributes if present
+    shape_metadata_attrs = [
+        "num_vanes",
+        "vane_twist",
+        "vane_thickness",
+        "magnet_radius",
+        "magnet_thickness",
+        "pump_well_wall",
+        "magnet_count",
+        "impeller_shaft_radius",
+        "slot_height",
+        "slot_width",
+        "spout_radius",
+        "spout_height",
+        "cutoff_y",
+        "ceiling_thickness",
+        "is_submerged",
+        "shelf_depth",
+        "tube_radius",
+        "intake_radius",
+        "drain_radius",
+    ]
+    shape_params: dict[str, Any] = {}
+    for attr in shape_metadata_attrs:
+        val = None
+        if hasattr(part, "__dict__") and attr in part.__dict__:
+            val = part.__dict__[attr]
+        elif hasattr(solid, "__dict__") and attr in solid.__dict__:
+            val = solid.__dict__[attr]
+        elif hasattr(part, attr) and not hasattr(type(part), attr):
+            val = getattr(part, attr, None)
+        elif hasattr(solid, attr) and not hasattr(type(solid), attr):
+            val = getattr(solid, attr, None)
+
+        if val is not None and attr not in overrides and attr not in joint_params:
+            shape_params[attr] = val
+
+    # 9. Merge defaults with overrides
+    candidates: dict[str, Any] = {
+        "shape": shape,
+        "type": type,
+        "radius": default_radius,
+        "height": default_height,
+        "thickness": default_thickness,
+        "xyz": default_xyz,
+        "rpy": default_rpy,
+        **shape_params,
+        **joint_params,
+        **overrides,
+    }
+    return candidates
