@@ -80,9 +80,14 @@ def compute_flow_metrics(provider: Any, step_idx: Optional[int] = None) -> dict[
         pool_zs = zs[pool_mask]
         pool_surface_z = float(np.percentile(pool_zs, 95))
         water_depth = max(0.0, pool_surface_z - floor_z)
+        surf_layer = pool_zs[pool_zs >= np.percentile(pool_zs, 80)]
+        pool_surface_variance = float(np.var(surf_layer)) if len(surf_layer) > 0 else 0.0
+        pool_wave_amplitude = float(np.max(pool_zs) - np.median(pool_zs)) if len(pool_zs) > 0 else 0.0
     else:
         pool_surface_z = floor_z
         water_depth = 0.0
+        pool_surface_variance = 0.0
+        pool_wave_amplitude = 0.0
 
     # 4. Drainage: Perimeter waterfall cascading into bowl (R >= 75mm, falling or rolling off lid rim)
     waterfall_mask = (r_xy >= 0.075) & (zs >= pool_surface_z + 0.005) & (zs <= lid_platform_z + 0.004)
@@ -135,6 +140,8 @@ def compute_flow_metrics(provider: Any, step_idx: Optional[int] = None) -> dict[
         "drainage_cutout": drain_cnt,
         "pool_volume": pool_cnt,
         "water_depth": round(water_depth, 5),
+        "pool_surface_variance": round(pool_surface_variance, 7),
+        "pool_wave_amplitude": round(pool_wave_amplitude, 5),
         "ejected_particles": ejected_cnt,
         "max_vertical_vel": round(max_vz, 4),
         "max_particle_speed": round(max_speed, 4),

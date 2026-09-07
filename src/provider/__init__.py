@@ -112,4 +112,5 @@ from .provider_router import ProviderRouter
 from .provider_manager import ProviderManager
 from .utils import load_manifest, discover_provider
 from .wiring_diagram import WiringDiagram
+from .blender import BlenderRenderer, CameraViewport, RenderConfig
 from model.wiring import Wiring

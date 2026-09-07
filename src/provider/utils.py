@@ -100,7 +100,12 @@ def load_manifest(path: str) -> dict[str, dict[Any, Any]]:
                 # Handle Color metadata
                 if key == "color":
                     if isinstance(val, dict):
-                        target_cfg[COLOR] = {str(k): ColorType(v) for k, v in val.items()}
+                        target_cfg[COLOR] = {
+                            str(k): (tuple(float(x) for x in v) if isinstance(v, (list, tuple)) else ColorType(v))
+                            for k, v in val.items()
+                        }
+                    elif isinstance(val, (list, tuple)):
+                        target_cfg[COLOR] = tuple(float(x) for x in val)
                     else:
                         target_cfg[COLOR] = ColorType(val)
                     continue

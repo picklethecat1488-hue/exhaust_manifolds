@@ -19,7 +19,13 @@ def _make_hashable(obj: Any) -> Any:
         return tuple(_make_hashable(i) for i in obj)
     if isinstance(obj, dict):
         return tuple(sorted((k, _make_hashable(v)) for k, v in obj.items()))
-    return obj
+    if hasattr(obj, "model_dump"):
+        return _make_hashable(obj.model_dump())
+    try:
+        hash(obj)
+        return obj
+    except TypeError:
+        return id(obj)
 
 
 def deep_copy_shape_or_builder(obj: Any, memo: Any = None) -> Any:

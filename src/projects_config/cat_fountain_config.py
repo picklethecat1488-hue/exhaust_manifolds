@@ -134,6 +134,16 @@ class CatFountainConfig(BaseModel):
         return float(self._raw_data.get("impeller_shaft_radius", 2.5))
 
     @cached_property
+    def impeller_shaft_clearance(self) -> float:
+        """Return the radial clearance between the guide post and impeller sleeve bore."""
+        return float(self._raw_data.get("impeller_shaft_clearance", 0.30))
+
+    @cached_property
+    def impeller_base_height(self) -> float:
+        """Return the height of the impeller base disk."""
+        return float(self._raw_data.get("impeller_base_height", 6.0))
+
+    @cached_property
     def impeller_blades(self) -> int:
         """Return the number of impeller blades."""
         return int(self._raw_data.get("impeller_blades", 6))
@@ -357,6 +367,26 @@ class CatFountainConfig(BaseModel):
     def bottom_cover_drain_radius(self) -> float:
         """Return the bottom cover central drainage hole radius."""
         return float(self._raw_data.get("bottom_cover_drain_radius", 8.0))
+
+    @cached_property
+    def rubber_feet_count(self) -> int:
+        """Return the number of rubber feet depressions on the bottom cover."""
+        return int(self._raw_data.get("rubber_feet_count", 4))
+
+    @cached_property
+    def rubber_feet_radius(self) -> float:
+        """Return the radius of the rubber feet depressions in millimeters."""
+        return float(self._raw_data.get("rubber_feet_radius", 5.5))
+
+    @cached_property
+    def rubber_feet_depth(self) -> float:
+        """Return the depth of the rubber feet depressions in millimeters."""
+        return float(self._raw_data.get("rubber_feet_depth", 1.0))
+
+    @cached_property
+    def rubber_feet_pitch_radius(self) -> float:
+        """Return the radial pitch distance from center for rubber feet depressions."""
+        return float(self._raw_data.get("rubber_feet_pitch_radius", 78.0))
 
     @cached_property
     def pcb_hole_radius(self) -> float:
@@ -693,6 +723,51 @@ class CatFountainConfig(BaseModel):
         return float(self._raw_data.get("pump_inlet_radius", 6.0))
 
     @cached_property
+    def pump_inlet_width(self) -> float:
+        """Return the width of the pump cover side water intake slot."""
+        return float(self._raw_data.get("pump_inlet_width", 12.0))
+
+    @cached_property
+    def pump_inlet_height(self) -> float:
+        """Return the height of the pump cover side water intake slot."""
+        return float(self._raw_data.get("pump_inlet_height", 4.0))
+
+    @cached_property
+    def pump_cover_height(self) -> float:
+        """Return the height of the pump cover cap over the casing."""
+        return float(self._raw_data.get("pump_cover_height", 4.0))
+
+    @cached_property
+    def pump_cover_sleeve_height(self) -> float:
+        """Return the height of the pump cover tube sleeve."""
+        return float(self._raw_data.get("pump_cover_sleeve_height", 8.0))
+
+    @cached_property
+    def pump_cover_tube_clearance(self) -> float:
+        """Return the clearance for the pump cover sleeve sliding over the tube."""
+        return float(self._raw_data.get("pump_cover_tube_clearance", 0.35))
+
+    @cached_property
+    def pump_cover_snap_clearance(self) -> float:
+        """Return the radial clearance for the pump cover downward lip entering the casing recess."""
+        return float(self._raw_data.get("pump_cover_snap_clearance", 0.45))
+
+    @cached_property
+    def pump_cover_lip_thickness(self) -> float:
+        """Return the thickness of the pump cover downward lip."""
+        return float(self._raw_data.get("pump_cover_lip_thickness", 1.5))
+
+    @cached_property
+    def pump_cover_internal_clearance(self) -> float:
+        """Return the extra radial clearance inside the pump cover over the volute chamber."""
+        return float(self._raw_data.get("pump_cover_internal_clearance", 0.40))
+
+    @cached_property
+    def pump_cover_clip_opening_width(self) -> float:
+        """Return the width of the North-facing snap opening in the pump cover tube sleeve."""
+        return float(self._raw_data.get("pump_cover_clip_opening_width", 14.8))
+
+    @cached_property
     def pump_outlet_radius(self) -> float:
         """Return the inner radius of the tangential water outlet nozzle."""
         return float(self._raw_data.get("pump_outlet_radius", 4.0))
@@ -703,6 +778,11 @@ class CatFountainConfig(BaseModel):
         return float(self._raw_data.get("pump_casing_clearance", 1.0))
 
     @cached_property
+    def drive_hub_shaft_radius(self) -> float:
+        """Return the motor shaft hole radius on the drive hub."""
+        return float(self._raw_data.get("drive_hub_shaft_radius", 0.85))
+
+    @cached_property
     def drive_hub_recess_radius(self) -> float:
         """Return the radius of the bowl's recess for the drive hub."""
         return float(self._raw_data.get("drive_hub_recess_radius", 17.0))
@@ -711,6 +791,16 @@ class CatFountainConfig(BaseModel):
     def drive_hub_recess_depth(self) -> float:
         """Return the depth of the bowl's recess for the drive hub."""
         return float(self._raw_data.get("drive_hub_recess_depth", 5.3))
+
+    @cached_property
+    def drive_hub_standoff_radius(self) -> float:
+        """Return the outer radius of the drive hub standoff thrust ring."""
+        return float(self._raw_data.get("drive_hub_standoff_radius", 2.5))
+
+    @cached_property
+    def drive_hub_standoff_height(self) -> float:
+        """Return the height of the drive hub standoff thrust ring."""
+        return float(self._raw_data.get("drive_hub_standoff_height", 0.8))
 
     @cached_property
     def bottom_cover_opening_width(self) -> float:

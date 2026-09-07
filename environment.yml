@@ -7,6 +7,8 @@ dependencies:
   - build123d
   - pybullet
   - pyyaml
+  - ffmpeg
+  - jinja2
   - pip
   - pip:
     - ocp-vscode==2.7.1
