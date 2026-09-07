@@ -28,3 +28,4 @@ from .fluid_body import (
 )
 from .coordinates import CoordinateSpace, CoordinateSystem, SpatialPose
 from .wiring import PinModel, LabelModel, FootprintModel, NetModel, Wiring
+from .material import MaterialModel, MaterialsModel

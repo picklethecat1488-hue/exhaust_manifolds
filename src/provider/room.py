@@ -62,6 +62,7 @@ from .utils import get_rgba_color
 
 if TYPE_CHECKING:
     from model.app_config import AppConfig
+    from model.material import MaterialsModel
 
 
 from .bullet import BulletStateTracker, _is_real_physics_client
@@ -74,11 +75,17 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
     Keys are unique names for the items, and values are tuples of (geometry, rgba_tuple).
     """
 
-    def __init__(self, config: Optional["AppConfig"] = None, is_simulate: bool = False):
-        """Initialize the room with an optional application configuration."""
+    def __init__(
+        self,
+        config: Optional["AppConfig"] = None,
+        is_simulate: bool = False,
+        materials: Optional["MaterialsModel"] = None,
+    ):
+        """Initialize the room with optional application configuration and materials model."""
         super().__init__()
         self.config = config
         self.is_simulate = is_simulate
+        self.materials = materials
         self._labels: list[tuple[str, str, Any, TextArgs]] = []
         self.gravity: tuple[float, float, float] = (0.0, 0.0, -9.81)
         self.line_weights: dict[str, float] = {}

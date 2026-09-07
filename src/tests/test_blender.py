@@ -168,3 +168,56 @@ class TestBlenderRenderer:
         assert "1440" in code
         # Check Python compilation of generated script
         compile(code, str(script_file), "exec")
+
+    def test_resolve_item_material_with_materials_model(self):
+        """Verify resolve_item_material resolves PBR properties directly from MaterialsModel."""
+        from model import MaterialModel, MaterialsModel
+
+        custom_mats = MaterialsModel(
+            material={
+                "custom_resin": MaterialModel(
+                    roughness=0.08,
+                    ior=1.52,
+                    transmission=0.90,
+                    metallic=0.1,
+                    specular=0.70,
+                )
+            }
+        )
+
+        dummy_geom = MagicMock()
+        dummy_geom.urdf_material = "custom_resin"
+
+        mat_params = BlenderRenderer.resolve_item_material(
+            name="test_part",
+            geom=dummy_geom,
+            rgba=(0.1, 0.5, 0.9, 0.4),
+            materials=custom_mats,
+        )
+
+        assert mat_params["material_type"] == "custom_resin"
+        assert mat_params["rgba"] == [0.1, 0.5, 0.9, 0.4]
+        assert mat_params["roughness"] == 0.08
+        assert mat_params["ior"] == 1.52
+        assert mat_params["transmission"] == 0.90
+        assert mat_params["metallic"] == 0.1
+        assert mat_params["specular"] == 0.70
+
+    def test_materials_model_from_yaml(self):
+        """Verify MaterialsModel loads correctly from print_materials.yaml."""
+        from model import MaterialsModel
+
+        mats = MaterialsModel.default()
+        assert "petg" in mats
+        assert "utr8100" in mats
+        assert "water" in mats
+
+        petg = mats.get("petg")
+        assert petg is not None
+        assert petg.roughness == 0.28
+        assert petg.ior == 1.57
+
+        utr = mats.get("utr8100")
+        assert utr is not None
+        assert utr.transmission == 0.88
+        assert utr.ior == 1.51

@@ -113,8 +113,8 @@ def generate_heightfield_cylinder_mesh(
     surface_positions: Optional[np.ndarray] = None,
     default_z_top: float = 0.078,
     center: tuple[float, float] = (0.0, 0.0),
-    n_rings: int = 6,
-    n_spokes: int = 32,
+    n_rings: int = 24,
+    n_spokes: int = 64,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate a watertight 3D cylinder triangle mesh with a dynamic top surface heightfield."""
     cx, cy = center
@@ -123,7 +123,7 @@ def generate_heightfield_cylinder_mesh(
     sin_s = np.sin(spoke_angles)
 
     # 1. Build 2D surface height grid from surface particles strictly within containing radius
-    nx, ny = 32, 32
+    nx, ny = 48, 48
     x_min, x_max = cx - radius, cx + radius
     y_min, y_max = cy - radius, cy + radius
     dx = max(1e-4, (x_max - x_min) / nx)
@@ -1124,6 +1124,7 @@ class FluidBody(BaseModel):
     surface_positions: Optional[np.ndarray] = Field(
         default=None, description="Local or surface particle positions (M, 3) for dynamic surface heightfield sampling."
     )
+    urdf_material: str = Field(default="water", description="URDF material name for physics and rendering.")
 
     @property
     def display_name(self) -> str:
@@ -1172,8 +1173,8 @@ class FluidBody(BaseModel):
                         surface_positions=self.surface_positions,
                         default_z_top=z_top_val,
                         center=center,
-                        n_rings=6,
-                        n_spokes=n_segments,
+                        n_rings=24,
+                        n_spokes=max(64, n_segments * 2),
                     )
 
             case FluidBodyType.STREAM:
@@ -1268,8 +1269,8 @@ class FluidBody(BaseModel):
                     surface_positions=self.surface_positions,
                     default_z_top=z_top_val,
                     center=center,
-                    n_rings=6,
-                    n_spokes=n_segments,
+                    n_rings=24,
+                    n_spokes=max(64, n_segments * 2),
                 )
 
             case _:

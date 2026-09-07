@@ -537,7 +537,7 @@ class CatFountainProvider(Provider):
 
             with URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "utr8100",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.ANALYTICAL,
@@ -704,7 +704,7 @@ class CatFountainProvider(Provider):
 
             with URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "petg",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.ANALYTICAL,
@@ -807,7 +807,7 @@ class CatFountainProvider(Provider):
 
             URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "utr8100",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,
@@ -954,7 +954,7 @@ class CatFountainProvider(Provider):
         with URDFMetadata(
             geometry=lid,
             label=target,
-            material=self.settings.material,
+            material=self.get_material(target) or "utr8100",
             density=self.settings.density,
             boundary_friction=self.settings.boundary_friction,
             collision_type=URDFCollisionType.ANALYTICAL,
@@ -1019,9 +1019,9 @@ class CatFountainProvider(Provider):
 
             URDFMetadata(
                 label=target,
-                material="petg",
-                density=self.settings.petg_density,
-                boundary_friction=self.settings.petg_boundary_friction,
+                material=self.get_material(target) or "utr8100",
+                density=self.settings.density,
+                boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,
                 parent="bowl",
                 joint_type=URDFJointType.FIXED,
@@ -1078,7 +1078,7 @@ class CatFountainProvider(Provider):
 
             URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "petg",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,
@@ -1186,9 +1186,9 @@ class CatFountainProvider(Provider):
 
             with URDFMetadata(
                 label=target,
-                material="petg",
-                density=self.settings.petg_density,
-                boundary_friction=self.settings.petg_boundary_friction,
+                material=self.get_material(target) or "utr8100",
+                density=self.settings.density,
+                boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.ANALYTICAL,
                 parent="bowl",
                 joint_type=URDFJointType.FIXED,
@@ -1271,15 +1271,19 @@ class CatFountainProvider(Provider):
         pump_cover_part.location = Location((0, 0, 110)) * pump_cover_part.location
         motor_clip_part.location = Location((0, -35, 0)) * motor_clip_part.location
 
-        # 4. Add the exploded parts to the room
-        room.add("bowl", bowl_part, color="grey", alpha=0.4)
-        room.add("impeller", impeller_part, color="red")
-        room.add("bottom_cover", bottom_cover_part, color="black")
-        room.add("lid", lid_part, color="green")
-        room.add("led_cover", led_cover, color="grey")
-        room.add("drive_hub", drive_hub_part, color="red")
-        room.add("pump_cover", pump_cover_part, color="grey", alpha=0.5)
-        room.add("motor_clip", motor_clip_part, color="yellow")
+        # 4. Add the exploded parts to the room using manifest colors
+        for name, part in [
+            ("bowl", bowl_part),
+            ("impeller", impeller_part),
+            ("bottom_cover", bottom_cover_part),
+            ("lid", lid_part),
+            ("led_cover", led_cover),
+            ("drive_hub", drive_hub_part),
+            ("pump_cover", pump_cover_part),
+            ("motor_clip", motor_clip_part),
+        ]:
+            rgba = self.get_color(name)
+            room.add(name, part, color=rgba[:3], alpha=rgba[3])
 
         # 5. Add connector lines indicating assembly paths
         impeller_conn = Line(
@@ -1369,96 +1373,19 @@ class CatFountainProvider(Provider):
         assert led_cover is not None
         bowl_part.joints["led_port"].connect_to(led_cover.joints["mount"])
 
-        # 3. Add the positioned parts directly to the room
-        if mode == ProviderMode.SIMULATE:
-            room.add("bowl", bowl_part, color="grey", alpha=0.4)
-            room.add("lid", lid_part, color="grey", alpha=0.4)
-            room.add("impeller", impeller_part, color="grey")
-            room.add("bottom_cover", bottom_cover_part, color="grey", alpha=0.4)
-            room.add("led_cover", led_cover, color="grey", alpha=0.4)
-            room.add("drive_hub", drive_hub_part, color="grey", alpha=0.4)
-            room.add("pump_cover", pump_cover_part, color="grey", alpha=0.4)
-            room.add("motor_clip", motor_clip_part, color="grey", alpha=0.4)
-        else:
-            room.add("bowl", bowl_part, color="grey", alpha=0.4)
-            room.add("lid", lid_part, color="green", alpha=0.6)
-            room.add("impeller", impeller_part, color="red")
-            room.add("bottom_cover", bottom_cover_part, color="black", alpha=0.6)
-            room.add("led_cover", led_cover, color="grey", alpha=0.4)
-            room.add("drive_hub", drive_hub_part, color="red")
-            room.add("pump_cover", pump_cover_part, color="grey", alpha=0.5)
-            room.add("motor_clip", motor_clip_part, color="yellow")
-
-        # 4. Build and add dummy PCBs for visualization and interference checking (non-printable)
-        if mode != ProviderMode.SIMULATE:
-
-            def make_motor() -> Part:
-                with BuildPart() as motor:
-                    # 1102 BLDC motor body (radius 6.9mm, height 9.3mm)
-                    Cylinder(radius=6.9, height=9.3, align=(Align.CENTER, Align.CENTER, Align.MAX))
-                    # 1.5mm shaft (radius 0.75mm, height 5.0mm)
-                    Cylinder(radius=0.75, height=5.0, align=(Align.CENTER, Align.CENTER, Align.MIN))
-                return cast(Part, motor.part)
-
-            motor_part = make_motor()
-            floor_z = self.settings.floor_z
-            motor_top_z = floor_z - 17.5 + self.settings.motor_clip_thickness + 9.3
-            motor_part.location = Location((0, 0, motor_top_z))
-            room.add("motor", motor_part, color="grey", alpha=0.8)
-
-            def make_pcb(w: float, l: float, h: float = 2.0) -> Part:
-                with BuildPart() as pcb:
-                    Box(w, l, h, align=(Align.CENTER, Align.CENTER, Align.CENTER))
-                    fillet_r = min(1.5, min(w, l) / 2.0 - 0.1)
-                    if fillet_r > 0.1:
-                        fillet(pcb.edges().filter_by(Axis.Z), radius=fillet_r)
-                return cast(Part, pcb.part)
-
-            def make_sensor_pcb() -> Part:
-                with BuildPart() as pcb:
-                    Box(2.0, 25.0, 17.0, align=(Align.CENTER, Align.CENTER, Align.CENTER))
-                    fillet(pcb.edges().filter_by(Axis.X), radius=1.5)
-                return cast(Part, pcb.part)
-
-            floor_z = self.settings.floor_z
-            t = self.settings.bowl_thickness
-
-            # Load component footprints using Wiring class directly
-            yaml_path = Path(__file__).parent / "wiring.yaml"
-            wiring = Wiring(yaml_path, bowl_part)
-            pcb_footprints = wiring.footprints
-            for fp in pcb_footprints:
-                if fp.name in ("motor", "led"):
-                    continue
-                w, l, thickness = fp.dimensions
-                if fp.package == "tof_sensor":
-                    joint_name = fp.name.replace("sensor_", "sensor_port_")
-                    joint_loc = bowl_part.joints[joint_name].location
-                    s_pcb = make_sensor_pcb()
-                    s_pcb.location = joint_loc * Location((-18.3, 0, 0))
-                    room.add(f"sensor_pcb_{fp.name.split('_')[-1]}", s_pcb, color="green", alpha=0.6)
-
-                    # Model the emitter and receiver cones (25-degree Field of View)
-                    def make_cone() -> Part:
-                        h = 40.0
-                        r1 = 0.5
-                        r2 = r1 + h * math.tan(math.radians(12.5))
-                        with BuildPart() as cone:
-                            Cone(r1, r2, h, align=(Align.CENTER, Align.CENTER, Align.MIN))
-                        return cast(Part, cone.part)
-
-                    e_cone = make_cone()
-                    e_cone.location = joint_loc * Location((-18.3, 0, 0)) * Location((2.0, -0.8, 0)) * Rot(0, 90, 0)
-                    room.add(f"sensor_emitter_{fp.name.split('_')[-1]}", e_cone, color="red", alpha=0.3)
-
-                    r_cone = make_cone()
-                    r_cone.location = joint_loc * Location((-18.3, 0, 0)) * Location((2.0, 0.8, 0)) * Rot(0, 90, 0)
-                    room.add(f"sensor_receiver_{fp.name.split('_')[-1]}", r_cone, color="blue", alpha=0.3)
-                else:
-                    pcb = make_pcb(w, l, thickness)
-                    pcb.location = Location(fp.position, fp.rotation)
-                    room.add(f"{fp.name}_pcb", pcb, color="green", alpha=0.6)
-
+        # 3. Add the positioned parts directly to the room using manifest colors
+        for name, part in [
+            ("bowl", bowl_part),
+            ("lid", lid_part),
+            ("impeller", impeller_part),
+            ("bottom_cover", bottom_cover_part),
+            ("led_cover", led_cover),
+            ("drive_hub", drive_hub_part),
+            ("pump_cover", pump_cover_part),
+            ("motor_clip", motor_clip_part),
+        ]:
+            rgba = self.get_color(name)
+            room.add(name, part, color=rgba[:3], alpha=rgba[3])
         self.room = room
 
     def get_simulate_hooks_impl(self, sim_name: str) -> dict[Simulate, Callable[..., Any]]:
@@ -1509,7 +1436,7 @@ class CatFountainProvider(Provider):
 
             URDFMetadata(
                 label=target,
-                material="petg",
+                material=self.get_material(target) or "petg",
                 density=self.settings.petg_density,
                 boundary_friction=self.settings.petg_boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,

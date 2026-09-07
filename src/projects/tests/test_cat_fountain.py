@@ -27,6 +27,14 @@ class TestCatFountainProvider:
                 Section.DIAGRAM: {"modes": [Mode.DEFAULT]},
             },
             "product": {Section.VIEW: {"modes": [Mode.DEFAULT, Mode.SIMULATE]}},
+            "bowl": {"material": "utr8100"},
+            "impeller": {"material": "petg"},
+            "bottom_cover": {"material": "utr8100"},
+            "lid": {"material": "utr8100"},
+            "led_cover": {"material": "utr8100"},
+            "drive_hub": {"material": "petg"},
+            "pump_cover": {"material": "utr8100"},
+            "motor_clip": {"material": "petg"},
         }
         with patch("provider.provider.load_manifest", return_value=mock_manifest):
             yield CatFountainProvider()
@@ -170,7 +178,7 @@ class TestCatFountainProvider:
         # Verify attributes on bowl
         bowl_shape = room["bowl"][0]
         assert bowl_shape.urdf_label == "bowl"
-        assert bowl_shape.urdf_material == "petg"
+        assert bowl_shape.urdf_material == "utr8100"
         assert bowl_shape.urdf_parent is None
         assert bowl_shape.urdf_joint_type is None
         assert bowl_shape.urdf_boundary_friction == 0.20
@@ -768,6 +776,7 @@ class TestCatFountainProvider:
         finally:
             p.disconnect(client)
 
+    @pytest.mark.slow
     def test_no_intersecting_parts(self, provider):
         """Verify that no parts intersect each other in the assembled configuration."""
         room = Room()
@@ -786,6 +795,7 @@ class TestCatFountainProvider:
                         f"Intersection detected between {name1} and {name2}: {vol:.3f} mm3"
                     )
 
+    @pytest.mark.slow
     def test_urdf_boundaries_conformance_with_cad_geometry(self, provider):
         """Verify that analytical URDF boundaries strictly conform to CAD dimensions and solid features."""
         from model.boundary_config import ShapeType

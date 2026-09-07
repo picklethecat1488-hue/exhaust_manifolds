@@ -110,7 +110,9 @@ class RenderConfig:
     shadow_catcher: bool = True
     background_color: tuple[float, float, float, float] = (0.06, 0.07, 0.09, 1.0)
     output_mp4: Optional[str] = None
+    turntable: bool = True
     crf: int = 18
+    materials: Optional[Any] = None
     blender_executable: str = field(default_factory=lambda: BlenderRenderer.find_blender_binary())
 
 
@@ -454,6 +456,48 @@ class BlenderRenderer:
         return output_path
 
     @classmethod
+    def resolve_item_material(
+        cls,
+        name: str,
+        geom: Any,
+        rgba: Sequence[float],
+        materials: Optional[Any] = None,
+    ) -> dict[str, Any]:
+        """Resolve strongly-typed PBR material parameters for a scene item from URDFMetadata and MaterialsModel."""
+        from model import MaterialsModel
+
+        if materials is None:
+            materials = MaterialsModel.default()
+
+        urdf_mat = getattr(geom, "urdf_material", None)
+        if urdf_mat is None and hasattr(geom, "part"):
+            urdf_mat = getattr(geom.part, "urdf_material", None)
+        if urdf_mat is None:
+            if name.startswith("water") or hasattr(geom, "body_type"):
+                urdf_mat = "water"
+
+        mat_key = str(urdf_mat).lower().replace("_", "").replace("-", "") if urdf_mat else "plastic"
+        mat_model = materials.get(mat_key) if materials else None
+        if mat_model is None and materials:
+            mat_model = materials.get("plastic") or materials.get("pla")
+
+        roughness = mat_model.roughness if mat_model else 0.30
+        ior = mat_model.ior if mat_model else 1.49
+        transmission = mat_model.transmission if mat_model else 0.0
+        metallic = mat_model.metallic if mat_model else 0.0
+        specular = mat_model.specular if mat_model else 0.50
+
+        return {
+            "material_type": urdf_mat or mat_key,
+            "rgba": list(rgba),
+            "roughness": roughness,
+            "ior": ior,
+            "transmission": transmission,
+            "metallic": metallic,
+            "specular": specular,
+        }
+
+    @classmethod
     def _export_room_to_dir(
         cls,
         room: Any,
@@ -467,6 +511,7 @@ class BlenderRenderer:
 
         items_meta = []
         all_verts = []
+        mats = config.materials or getattr(room, "materials", None)
 
         for name, (geom, rgba) in room.items():
             # Handle build123d shapes and trimesh geometry
@@ -484,16 +529,13 @@ class BlenderRenderer:
                 if hasattr(tm, "vertices") and len(tm.vertices) > 0:
                     all_verts.append(np.asarray(tm.vertices))
 
-                is_water = "water" in name.lower() or "fluid" in name.lower()
-                is_trans = rgba[3] < 0.90 or "clear" in name.lower() or "acrylic" in name.lower()
+                mat_params = cls.resolve_item_material(name, geom, rgba, materials=mats)
                 items_meta.append(
                     {
                         "name": name,
                         "file": obj_path,
-                        "rgba": list(rgba),
-                        "is_water": is_water,
-                        "is_transparent": is_trans,
-                        "scale": 1.0,  # Scaled to meters in OBJ
+                        "scale": 1.0,
+                        **mat_params,
                     }
                 )
             elif hasattr(geom, "vertices") and hasattr(geom, "faces"):
@@ -502,16 +544,13 @@ class BlenderRenderer:
                 geom.export(obj_path)
                 if len(geom.vertices) > 0:
                     all_verts.append(np.asarray(geom.vertices))
-                is_water = "water" in name.lower() or "fluid" in name.lower()
-                is_trans = rgba[3] < 0.90 or "clear" in name.lower() or "acrylic" in name.lower()
+                mat_params = cls.resolve_item_material(name, geom, rgba, materials=mats)
                 items_meta.append(
                     {
                         "name": name,
                         "file": obj_path,
-                        "rgba": list(rgba),
-                        "is_water": is_water,
-                        "is_transparent": is_trans,
                         "scale": 1.0,
+                        **mat_params,
                     }
                 )
 
@@ -565,6 +604,7 @@ class BlenderRenderer:
         with open(scene_data_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
 
+        mats = config.materials or getattr(room, "materials", None)
         frames_meta = []
         for step_idx in range(sim_steps):
             frame_items = []
@@ -578,14 +618,15 @@ class BlenderRenderer:
                         b_path = os.path.join(target_dir, b_name)
                         tm = trimesh.Trimesh(vertices=verts, faces=faces)
                         tm.export(b_path)
+                        water_mat = cls.resolve_item_material(
+                            body.display_name, body, [0.2, 0.65, 0.95, 0.40], materials=mats
+                        )
                         frame_items.append(
                             {
                                 "name": body.display_name,
                                 "file": b_path,
-                                "rgba": [0.2, 0.65, 0.95, 0.40],
-                                "is_water": True,
-                                "is_transparent": True,
                                 "scale": 1.0,
+                                **water_mat,
                             }
                         )
             # Export water meshes if present
@@ -597,14 +638,13 @@ class BlenderRenderer:
                         b_path = os.path.join(target_dir, b_name)
                         tm = trimesh.Trimesh(vertices=verts, faces=faces)
                         tm.export(b_path)
+                        water_mat = cls.resolve_item_material(m_name, None, [0.2, 0.65, 0.95, 0.40], materials=mats)
                         frame_items.append(
                             {
                                 "name": m_name,
                                 "file": b_path,
-                                "rgba": [0.2, 0.65, 0.95, 0.40],
-                                "is_water": True,
-                                "is_transparent": True,
                                 "scale": 1.0,
+                                **water_mat,
                             }
                         )
 
@@ -622,6 +662,7 @@ class BlenderRenderer:
             )
 
         manifest["frames"] = frames_meta
+        manifest["turntable"] = config.turntable
         with open(scene_data_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
