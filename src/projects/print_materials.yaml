@@ -18,6 +18,11 @@ material:
     density: 1.24
     boundary_friction: 0.30
     contact_angle: 68.0
+    roughness: 0.30
+    ior: 1.49
+    transmission: 0.0
+    metallic: 0.0
+    specular: 0.50
 
   # Polyethylene Terephthalate Glycol-modified (PETG)
   # A thermoplastic polyester that provides significant chemical resistance, durability,
@@ -26,6 +31,11 @@ material:
     density: 1.27
     boundary_friction: 0.20
     contact_angle: 75.0
+    roughness: 0.28
+    ior: 1.57
+    transmission: 0.0
+    metallic: 0.0
+    specular: 0.50
 
   # Acrylonitrile Butadiene Styrene (ABS)
   # An impact-resistant engineering plastic. Strong, tough, and heat-resistant,
@@ -34,6 +44,11 @@ material:
     density: 1.04
     boundary_friction: 0.25
     contact_angle: 80.0
+    roughness: 0.35
+    ior: 1.50
+    transmission: 0.0
+    metallic: 0.0
+    specular: 0.50
 
   # Thermoplastic Polyurethane (TPU)
   # A flexible, elastic copolymer with high abrasion resistance, rubber-like elasticity,
@@ -42,15 +57,65 @@ material:
     density: 1.20
     boundary_friction: 0.50
     contact_angle: 85.0
+    roughness: 0.45
+    ior: 1.45
+    transmission: 0.0
+    metallic: 0.0
+    specular: 0.30
 
   # Aluminum
   aluminum:
     density: 2.70
     boundary_friction: 0.15
     contact_angle: 70.0
+    roughness: 0.35
+    ior: 1.50
+    transmission: 0.0
+    metallic: 0.85
+    specular: 0.50
 
   # UTR-8100 Translucent Resin (SLA)
   utr8100:
     density: 1.15
     boundary_friction: 0.22
     contact_angle: 72.0
+    roughness: 0.35
+    ior: 1.51
+    transmission: 0.88
+    metallic: 0.0
+    specular: 0.20
+
+  # Water (Liquid)
+  water:
+    density: 1.00
+    boundary_friction: 0.0
+    contact_angle: 0.0
+    roughness: 0.08
+    ior: 1.333
+    transmission: 0.98
+    metallic: 0.0
+    specular: 0.25
+
+  # Generic Metal
+  metal:
+    density: 7.85
+    boundary_friction: 0.20
+    contact_angle: 70.0
+    roughness: 0.35
+    ior: 1.50
+    transmission: 0.0
+    metallic: 0.85
+    specular: 0.50
+
+  # Generic Plastic
+  plastic:
+    density: 1.15
+    boundary_friction: 0.30
+    contact_angle: 75.0
+    roughness: 0.30
+    ior: 1.49
+    transmission: 0.0
+    metallic: 0.0
+    specular: 0.50
+
+

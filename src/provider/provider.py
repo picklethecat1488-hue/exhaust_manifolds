@@ -7,6 +7,7 @@ import math
 from contextvars import ContextVar
 from typing import Optional, Any, Callable, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
+from functools import cached_property
 from pydantic import validate_call, BaseModel
 from typing import cast
 from model.app_config import AppConfig
@@ -85,7 +86,7 @@ class ProviderOrchestrator(Orchestrator):
             # Diagrams operate on all targets at once. We pick the handler for the first target.
             handler = self.provider.diagram[targets[0]]
             # Diagrams operate on all targets at once and return content in a Room.
-            room = Room(config=self.provider.app_config)
+            room = Room(config=self.provider.app_config, materials=self.provider.materials)
             handler(room, targets, modes[0])
             results = [room]
             self.post_handler(targets, results, action)
@@ -99,7 +100,7 @@ class ProviderOrchestrator(Orchestrator):
 
             def view_task(item: tuple[str, Optional[str], Mode]) -> Room:
                 target, _, m = item
-                room = Room(config=self.provider.app_config)
+                room = Room(config=self.provider.app_config, materials=self.provider.materials)
                 setattr(room, "mode", m)
                 self.provider.view[target](room, m)
                 return room
@@ -378,6 +379,13 @@ class Provider:
             return None
 
         return str(material)
+
+    @cached_property
+    def materials(self) -> "MaterialsModel":
+        """Return strongly-typed materials model loaded from the manifest."""
+        from model import MaterialsModel
+
+        return MaterialsModel.from_manifest(self.manifest)
 
     @validate_call(config={"arbitrary_types_allowed": True})
     def get_export_types(self, target: str, subassembly: Optional[str] = None) -> list[str]:

@@ -1,0 +1,291 @@
+import bpy
+import json
+import math
+import os
+import sys
+import traceback
+import mathutils
+
+try:
+    with open(r"{{ scene_data_path }}", "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    # Clear default scene
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    scene = bpy.context.scene
+
+    # Configure Render Engine & Resolution
+    engine_name = "{{ engine }}".upper()
+    if "EEVEE" in engine_name:
+        scene.render.engine = "BLENDER_EEVEE"
+    elif "CYCLES" in engine_name:
+        scene.render.engine = "CYCLES"
+    elif "WORKBENCH" in engine_name:
+        scene.render.engine = "BLENDER_WORKBENCH"
+    else:
+        scene.render.engine = "BLENDER_EEVEE"
+
+    scene.render.resolution_x = {{ resolution_x }}
+    scene.render.resolution_y = {{ resolution_y }}
+    scene.render.resolution_percentage = 100
+    scene.render.fps = {{ fps }}
+
+    # Configure Cycles / EEVEE Quality & Raytracing
+    if hasattr(scene, "eevee"):
+        if hasattr(scene.eevee, "taa_render_samples"):
+            scene.eevee.taa_render_samples = {{ samples }}
+        if hasattr(scene.eevee, "use_raytracing"):
+            scene.eevee.use_raytracing = True
+        if hasattr(scene.eevee, "use_fast_gi"):
+            scene.eevee.use_fast_gi = True
+    if hasattr(scene, "cycles"):
+        scene.cycles.samples = {{ samples }}
+
+    # World & Background Lighting
+    world = bpy.data.worlds.new("StudioWorld")
+    scene.world = world
+    world.use_nodes = True
+    bg_node = world.node_tree.nodes.get("Background")
+    if bg_node:
+        bg_node.inputs["Color"].default_value = ({{ background_color[0] }}, {{ background_color[1] }}, {{ background_color[2] }}, 1.0)
+        bg_node.inputs["Strength"].default_value = 1.0
+
+    # 1. 3-Point Studio Lighting Setup (6500K Daylight, Soft Diffused Studio Lights)
+    c_target = mathutils.Vector(manifest.get("center", [0.0, 0.0, 0.06]))
+
+    # Key Light (Soft Daylight Area Light)
+    key_light_data = bpy.data.lights.new("KeyLight", type="AREA")
+    key_light_data.energy = 120.0
+    key_light_data.size = 0.8
+    key_light_data.color = (1.0, 1.0, 1.0)
+    key_light_obj = bpy.data.objects.new("KeyLight", key_light_data)
+    scene.collection.objects.link(key_light_obj)
+    key_light_obj.location = (c_target.x + 0.40, c_target.y - 0.45, c_target.z + 0.55)
+    dir_key = c_target - key_light_obj.location
+    key_light_obj.rotation_euler = dir_key.to_track_quat("-Z", "Y").to_euler()
+
+    # Fill Light (Soft Daylight Area Light)
+    fill_light_data = bpy.data.lights.new("FillLight", type="AREA")
+    fill_light_data.energy = 60.0
+    fill_light_data.size = 0.8
+    fill_light_data.color = (1.0, 1.0, 1.0)
+    fill_light_obj = bpy.data.objects.new("FillLight", fill_light_data)
+    scene.collection.objects.link(fill_light_obj)
+    fill_light_obj.location = (c_target.x - 0.45, c_target.y - 0.30, c_target.z + 0.40)
+    dir_fill = c_target - fill_light_obj.location
+    fill_light_obj.rotation_euler = dir_fill.to_track_quat("-Z", "Y").to_euler()
+
+    # Rim Light (Top-Back Daylight Accent for edge refraction and fluid highlights)
+    rim_light_data = bpy.data.lights.new("RimLight", type="AREA")
+    rim_light_data.energy = 80.0
+    rim_light_data.size = 0.6
+    rim_light_data.color = (1.0, 1.0, 1.0)
+    rim_light_obj = bpy.data.objects.new("RimLight", rim_light_data)
+    scene.collection.objects.link(rim_light_obj)
+    rim_light_obj.location = (c_target.x, c_target.y + 0.45, c_target.z + 0.50)
+    dir_rim = c_target - rim_light_obj.location
+    rim_light_obj.rotation_euler = dir_rim.to_track_quat("-Z", "Y").to_euler()
+
+    # Studio Floor Pedestal
+    c_center = manifest.get("center", [0.0, 0.0, 0.06])
+    bpy.ops.mesh.primitive_cylinder_add(
+        radius=0.25,
+        depth=0.004,
+        location=(c_center[0], c_center[1], -0.002),
+    )
+    floor_obj = bpy.context.active_object
+    floor_obj.name = "StudioPedestal"
+    floor_mat = bpy.data.materials.new(name="Mat_Pedestal")
+    floor_mat.use_nodes = True
+    floor_bsdf = floor_mat.node_tree.nodes.get("Principled BSDF")
+    if floor_bsdf:
+        floor_bsdf.inputs["Base Color"].default_value = (0.12, 0.14, 0.18, 1.0)
+        floor_bsdf.inputs["Roughness"].default_value = 0.35
+        if "Specular IOR Level" in floor_bsdf.inputs:
+            floor_bsdf.inputs["Specular IOR Level"].default_value = 0.20
+    floor_obj.data.materials.append(floor_mat)
+
+    # 2. Camera Setup
+    cam_meta = manifest["camera"]
+    cam_data = bpy.data.cameras.new("Camera")
+    cam_data.lens = cam_meta.get("focal_length", 50.0)
+    cam_obj = bpy.data.objects.new("Camera", cam_data)
+    scene.collection.objects.link(cam_obj)
+    scene.camera = cam_obj
+
+    cam_loc = mathutils.Vector(cam_meta["location"])
+    target_loc = mathutils.Vector(cam_meta["target"])
+    cam_obj.location = cam_loc
+    dir_cam = target_loc - cam_loc
+    cam_obj.rotation_euler = dir_cam.to_track_quat("-Z", "Y").to_euler()
+
+    # Helper for importing OBJ with upright +Z axis
+    def import_obj_file(filepath):
+        if hasattr(bpy.ops.wm, "obj_import"):
+            bpy.ops.wm.obj_import(filepath=filepath, forward_axis="Y", up_axis="Z")
+        else:
+            bpy.ops.import_scene.obj(filepath=filepath, axis_forward="Y", axis_up="Z")
+
+    # 3. Material Generators
+    def get_or_create_material(item):
+        name = item["name"]
+        mat_name = f"Mat_{name}"
+        if mat_name in bpy.data.materials:
+            return bpy.data.materials[mat_name]
+
+        mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        bsdf = nodes.get("Principled BSDF")
+        if not bsdf:
+            return mat
+
+        rgba = item.get("rgba", [0.8, 0.8, 0.8, 1.0])
+        roughness = item.get("roughness", 0.30)
+        ior = item.get("ior", 1.49)
+        transmission = item.get("transmission", 0.0)
+        metallic = item.get("metallic", 0.0)
+        specular = item.get("specular", 0.50)
+        alpha_val = rgba[3] if len(rgba) > 3 else 1.0
+
+        bsdf.inputs["Base Color"].default_value = (rgba[0], rgba[1], rgba[2], 1.0)
+        bsdf.inputs["Roughness"].default_value = roughness
+        bsdf.inputs["IOR"].default_value = ior
+        bsdf.inputs["Metallic"].default_value = metallic
+
+        if "Transmission Weight" in bsdf.inputs:
+            bsdf.inputs["Transmission Weight"].default_value = transmission
+        elif "Transmission" in bsdf.inputs:
+            bsdf.inputs["Transmission"].default_value = transmission
+
+        if "Specular IOR Level" in bsdf.inputs:
+            bsdf.inputs["Specular IOR Level"].default_value = specular
+        elif "Specular" in bsdf.inputs:
+            bsdf.inputs["Specular"].default_value = specular
+
+        if "Alpha" in bsdf.inputs:
+            bsdf.inputs["Alpha"].default_value = alpha_val
+
+        # Enable EEVEE and raytraced refraction settings for translucent materials
+        if transmission > 0.0 or alpha_val < 1.0:
+            if hasattr(mat, "use_screen_refraction"):
+                mat.use_screen_refraction = True
+            if hasattr(mat, "use_raytrace_refraction"):
+                mat.use_raytrace_refraction = True
+            if hasattr(mat, "use_transparent_shadow"):
+                mat.use_transparent_shadow = True
+            if hasattr(mat, "surface_render_method"):
+                mat.surface_render_method = "BLENDED"
+            if hasattr(mat, "blend_method"):
+                mat.blend_method = "BLEND" if alpha_val < 1.0 else "OPAQUE"
+            if hasattr(mat, "shadow_method"):
+                mat.shadow_method = "HASHED"
+
+        return mat
+
+    # 4. Import Base CAD Objects
+    imported_objects = {}
+    for item in manifest["items"]:
+        f_path = item["file"]
+        if not os.path.exists(f_path):
+            continue
+        # Deselect prior objects
+        bpy.ops.object.select_all(action="DESELECT")
+        import_obj_file(f_path)
+
+        mat = get_or_create_material(item)
+
+        for obj in bpy.context.selected_objects:
+            obj.name = item["name"]
+            obj.rotation_mode = "QUATERNION"
+            scale_factor = item.get("scale", 1.0)
+            if abs(scale_factor - 1.0) > 1e-6:
+                obj.scale = (scale_factor, scale_factor, scale_factor)
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+            if hasattr(obj.data, "polygons"):
+                for poly in obj.data.polygons:
+                    poly.use_smooth = True
+
+            obj.data.materials.clear()
+            obj.data.materials.append(mat)
+            imported_objects[item["name"]] = obj
+
+    # 5. Render execution
+    output_target = r"{{ output_path }}"
+    scene.render.filepath = output_target
+
+{% if is_animation %}
+    tot_f = {{ total_frames }}
+    scene.frame_start = 0
+    scene.frame_end = tot_f - 1
+
+    is_turntable = manifest.get("turntable", True)
+    t_center = mathutils.Vector(manifest["center"])
+    orig_cam_loc = mathutils.Vector(manifest["camera"]["location"])
+    delta = orig_cam_loc - t_center
+    r_xy = math.sqrt(delta.x**2 + delta.y**2)
+    elev_z = delta.z
+    start_angle = math.atan2(delta.x, -delta.y)
+
+    frames_data = manifest.get("frames", [])
+
+    for f_idx in range(tot_f):
+        scene.frame_set(f_idx)
+
+        # Update camera position if turntable is active
+        if is_turntable:
+            theta = start_angle + (2.0 * math.pi * f_idx) / tot_f
+            cam_obj.location = (
+                t_center.x + r_xy * math.sin(theta),
+                t_center.y - r_xy * math.cos(theta),
+                t_center.z + elev_z,
+            )
+            dir_c = t_center - cam_obj.location
+            cam_obj.rotation_euler = dir_c.to_track_quat("-Z", "Y").to_euler()
+
+        current_water_objs = []
+        if f_idx < len(frames_data):
+            frame_info = frames_data[f_idx]
+
+            # Add dynamic water meshes for this frame
+            for w_item in frame_info.get("water_items", []):
+                w_path = w_item["file"]
+                if os.path.exists(w_path):
+                    bpy.ops.object.select_all(action="DESELECT")
+                    import_obj_file(w_path)
+                    w_mat = get_or_create_material(w_item)
+                    for w_obj in bpy.context.selected_objects:
+                        if hasattr(w_obj.data, "polygons"):
+                            for poly in w_obj.data.polygons:
+                                poly.use_smooth = True
+                        w_obj.data.materials.clear()
+                        w_obj.data.materials.append(w_mat)
+                        current_water_objs.append(w_obj)
+
+            # Apply rigid transforms if present
+            for link_name, (pos, orn) in frame_info.get("transforms", {}).items():
+                if link_name in imported_objects:
+                    obj = imported_objects[link_name]
+                    obj.rotation_mode = "QUATERNION"
+                    obj.location = mathutils.Vector(pos)
+                    obj.rotation_quaternion = mathutils.Quaternion((orn[3], orn[0], orn[1], orn[2]))
+
+        scene.render.filepath = output_target.replace("####", f"{f_idx:05d}")
+        bpy.ops.render.render(write_still=True)
+
+        # Clean up transient water objects and their underlying mesh data
+        for w_obj in current_water_objs:
+            w_mesh = w_obj.data
+            bpy.data.objects.remove(w_obj, do_unlink=True)
+            if w_mesh:
+                bpy.data.meshes.remove(w_mesh, do_unlink=True)
+{% else %}
+    bpy.ops.render.render(write_still=True)
+{% endif %}
+
+    print("✅ Blender render execution completed successfully.")
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
