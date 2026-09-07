@@ -1173,3 +1173,39 @@ def test_splash_cluster_vertical_span_and_pool_depth_stability():
         assert mesh.volume > 0.0
         h = np.max(verts[:, 2]) - np.min(verts[:, 2])
         assert h <= 0.012, f"Splash cluster height {h * 1000:.1f}mm exceeded 12mm maximum threshold"
+
+
+def test_generate_droplet_mesh():
+    """Verify generate_droplet_mesh produces watertight aerodynamic droplets and resting meniscus meshes."""
+    import trimesh
+    from model.fluid_body import generate_droplet_mesh
+
+    # 1. Moving droplet: elongated along velocity vector
+    center_mov = (0.01, 0.02, 0.05)
+    vel_mov = (0.0, 0.4, -0.8)  # Speed ~0.89 m/s
+    v_mov, f_mov = generate_droplet_mesh(center=center_mov, velocity=vel_mov, radius=0.003)
+    mesh_mov = trimesh.Trimesh(vertices=v_mov, faces=f_mov)
+    assert mesh_mov.is_watertight
+    assert mesh_mov.volume > 0.0
+    assert mesh_mov.euler_number == 2
+
+    # Verify major axis is aligned with velocity vector
+    cov = np.cov(v_mov - np.mean(v_mov, axis=0), rowvar=False)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    major_axis = eigvecs[:, np.argmax(eigvals)]
+    v_unit = np.array(vel_mov) / np.linalg.norm(vel_mov)
+    alignment = abs(float(np.dot(major_axis, v_unit)))
+    assert alignment > 0.95, f"Droplet major axis not aligned with velocity vector ({alignment:.3f})"
+
+    # 2. Resting surface droplet: oblate meniscus
+    center_rest = (0.0, 0.0, 0.0)
+    vel_rest = (0.0, 0.0, 0.0)
+    v_rest, f_rest = generate_droplet_mesh(center=center_rest, velocity=vel_rest, radius=0.003)
+    mesh_rest = trimesh.Trimesh(vertices=v_rest, faces=f_rest)
+    assert mesh_rest.is_watertight
+    assert mesh_rest.volume > 0.0
+    assert mesh_rest.euler_number == 2
+    # Z span should be less than XY span (flattened)
+    z_span = np.max(v_rest[:, 2]) - np.min(v_rest[:, 2])
+    xy_span = np.max(v_rest[:, 0]) - np.min(v_rest[:, 0])
+    assert z_span < xy_span, f"Resting droplet not oblate/flattened (z_span={z_span}, xy_span={xy_span})"

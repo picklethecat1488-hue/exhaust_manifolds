@@ -19,6 +19,22 @@ import numpy as np
 from .types import ColorType
 from .utils import get_rgba_color
 
+_JINJA_ENV: Optional[jinja2.Environment] = None
+
+
+def _get_jinja_env() -> jinja2.Environment:
+    """Return pre-cached Jinja2 environment for Blender script rendering."""
+    global _JINJA_ENV
+    if _JINJA_ENV is None:
+        templates_dir = os.path.join(os.path.dirname(__file__), "templates")
+        _JINJA_ENV = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(templates_dir),
+            trim_blocks=True,
+            lstrip_blocks=True,
+            autoescape=False,
+        )
+    return _JINJA_ENV
+
 
 @dataclass
 class CameraViewport:
@@ -105,7 +121,7 @@ class RenderConfig:
     resolution: tuple[int, int] = (2560, 1440)
     fps: int = 60
     samples: int = 32
-    engine: str = "BLENDER_EEVEE"
+    engine: str = "CYCLES"
     view_from: str = "iso"
     shadow_catcher: bool = True
     background_color: tuple[float, float, float, float] = (0.06, 0.07, 0.09, 1.0)
@@ -306,6 +322,16 @@ class BlenderRenderer:
             return False
 
     @classmethod
+    def _build_blender_exec_cmd(cls, script_path: str, blender_executable: str) -> list[str]:
+        """Construct the subprocess command for running Blender headless, wrapping with xvfb-run on Linux if headless."""
+        cmd = [blender_executable, "-b", "-P", script_path]
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            xvfb = shutil.which("xvfb-run")
+            if xvfb:
+                return [xvfb, "-a", *cmd]
+        return cmd
+
+    @classmethod
     def render_still(
         cls,
         room: Any,
@@ -334,7 +360,7 @@ class BlenderRenderer:
             )
 
             # 3. Run Blender headless
-            cmd = [config.blender_executable, "-b", "-P", script_path]
+            cmd = cls._build_blender_exec_cmd(script_path, config.blender_executable)
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode != 0:
                 raise RuntimeError(f"Blender render failed (exit code {res.returncode}):\n{res.stderr}\n{res.stdout}")
@@ -380,7 +406,7 @@ class BlenderRenderer:
             )
 
             # 3. Run Blender headless
-            cmd = [config.blender_executable, "-b", "-P", script_path]
+            cmd = cls._build_blender_exec_cmd(script_path, config.blender_executable)
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode != 0:
                 raise RuntimeError(f"Blender render failed (exit code {res.returncode}):\n{res.stderr}\n{res.stdout}")
@@ -440,7 +466,7 @@ class BlenderRenderer:
             )
 
             # 3. Run Blender headless to render frame sequence
-            cmd = [config.blender_executable, "-b", "-P", script_path]
+            cmd = cls._build_blender_exec_cmd(script_path, config.blender_executable)
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode != 0:
                 raise RuntimeError(f"Blender render failed (exit code {res.returncode}):\n{res.stderr}\n{res.stdout}")
@@ -598,8 +624,6 @@ class BlenderRenderer:
         rigid_transforms_per_frame: Optional[list[dict[str, tuple[list[float], list[float]]]]] = None,
     ) -> None:
         """Export full simulation frame meshes and joint transforms to directory."""
-        import trimesh
-
         cls._export_room_to_dir(room, target_dir, scene_data_path, config)
         with open(scene_data_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -611,42 +635,56 @@ class BlenderRenderer:
             # Export fluid bodies if present
             if fluid_bodies_per_frame and step_idx < len(fluid_bodies_per_frame):
                 bodies = fluid_bodies_per_frame[step_idx]
-                for b_idx, body in enumerate(bodies):
+                mesh_verts_list = []
+                mesh_faces_list = []
+                vert_offset = 0
+                for body in bodies:
                     verts, faces = body.to_mesh()
                     if len(verts) > 0 and len(faces) > 0:
-                        b_name = f"water_{body.display_name}_{step_idx:05d}_{b_idx}.obj"
-                        b_path = os.path.join(target_dir, b_name)
-                        tm = trimesh.Trimesh(vertices=verts, faces=faces)
-                        tm.export(b_path)
-                        water_mat = cls.resolve_item_material(
-                            body.display_name, body, [0.2, 0.65, 0.95, 0.40], materials=mats
-                        )
-                        frame_items.append(
-                            {
-                                "name": body.display_name,
-                                "file": b_path,
-                                "scale": 1.0,
-                                **water_mat,
-                            }
-                        )
+                        mesh_verts_list.append(verts)
+                        mesh_faces_list.append(faces + vert_offset)
+                        vert_offset += len(verts)
+                if mesh_verts_list:
+                    comb_verts = np.vstack(mesh_verts_list).astype(np.float32)
+                    comb_faces = np.vstack(mesh_faces_list).astype(np.uint32)
+                    b_name = f"water_frame_{step_idx:05d}.npz"
+                    b_path = os.path.join(target_dir, b_name)
+                    np.savez(b_path, verts=comb_verts, faces=comb_faces)
+                    water_mat = cls.resolve_item_material("water", None, [0.2, 0.65, 0.95, 0.40], materials=mats)
+                    frame_items.append(
+                        {
+                            "name": "water",
+                            "file": b_path,
+                            "scale": 1.0,
+                            **water_mat,
+                        }
+                    )
             # Export water meshes if present
             elif water_meshes_per_frame and step_idx < len(water_meshes_per_frame):
                 meshes_dict = water_meshes_per_frame[step_idx]
-                for m_idx, (m_name, (verts, faces)) in enumerate(meshes_dict.items()):
+                mesh_verts_list = []
+                mesh_faces_list = []
+                vert_offset = 0
+                for m_name, (verts, faces) in meshes_dict.items():
                     if len(verts) > 0 and len(faces) > 0:
-                        b_name = f"water_{m_name}_{step_idx:05d}_{m_idx}.obj"
-                        b_path = os.path.join(target_dir, b_name)
-                        tm = trimesh.Trimesh(vertices=verts, faces=faces)
-                        tm.export(b_path)
-                        water_mat = cls.resolve_item_material(m_name, None, [0.2, 0.65, 0.95, 0.40], materials=mats)
-                        frame_items.append(
-                            {
-                                "name": m_name,
-                                "file": b_path,
-                                "scale": 1.0,
-                                **water_mat,
-                            }
-                        )
+                        mesh_verts_list.append(verts)
+                        mesh_faces_list.append(faces + vert_offset)
+                        vert_offset += len(verts)
+                if mesh_verts_list:
+                    comb_verts = np.vstack(mesh_verts_list).astype(np.float32)
+                    comb_faces = np.vstack(mesh_faces_list).astype(np.uint32)
+                    b_name = f"water_frame_{step_idx:05d}.npz"
+                    b_path = os.path.join(target_dir, b_name)
+                    np.savez(b_path, verts=comb_verts, faces=comb_faces)
+                    water_mat = cls.resolve_item_material("water", None, [0.2, 0.65, 0.95, 0.40], materials=mats)
+                    frame_items.append(
+                        {
+                            "name": "water",
+                            "file": b_path,
+                            "scale": 1.0,
+                            **water_mat,
+                        }
+                    )
 
             rigid_transforms = (
                 rigid_transforms_per_frame[step_idx]
@@ -677,13 +715,7 @@ class BlenderRenderer:
         total_frames: int = 1,
     ) -> None:
         """Generate the Python script executed inside headless Blender via Jinja2 template."""
-        templates_dir = os.path.join(os.path.dirname(__file__), "templates")
-        env = jinja2.Environment(
-            loader=jinja2.FileSystemLoader(templates_dir),
-            trim_blocks=True,
-            lstrip_blocks=True,
-            autoescape=False,
-        )
+        env = _get_jinja_env()
         template = env.get_template("render_blender.py.j2")
         rendered_script = template.render(
             scene_data_path=scene_data_path,

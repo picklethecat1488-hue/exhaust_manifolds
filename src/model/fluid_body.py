@@ -3,10 +3,38 @@
 from __future__ import annotations
 
 from enum import Enum
+from functools import partial
 import math
 from typing import Any, NamedTuple, Optional, Sequence, Union
+
+import jax
+import jax.numpy as jnp
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
+
+
+_CYLINDER_FACES_CACHE: dict[int, np.ndarray] = {}
+_UNIT_SPHERE_TEMPLATE_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+_ARC_WATERFALL_FACES_CACHE: dict[int, np.ndarray] = {}
+_LIP_WATERFALL_FACES_CACHE: dict[int, np.ndarray] = {}
+_WATERFALL_FACES_CACHE: dict[tuple[int, int], np.ndarray] = {}
+_CYLINDER_HEIGHTFIELD_TEMPLATE_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray, int, int]] = {}
+
+
+def _get_cylinder_faces(n_segments: int = 32) -> np.ndarray:
+    """Return pre-computed face index array for a standard cylinder."""
+    if n_segments not in _CYLINDER_FACES_CACHE:
+        idx_bot_c = 2 * n_segments
+        idx_top_c = 2 * n_segments + 1
+        faces = []
+        for i in range(n_segments):
+            next_i = (i + 1) % n_segments
+            faces.append([i, n_segments + i, n_segments + next_i])
+            faces.append([i, n_segments + next_i, next_i])
+            faces.append([idx_bot_c, next_i, i])
+            faces.append([idx_top_c, n_segments + i, n_segments + next_i])
+        _CYLINDER_FACES_CACHE[n_segments] = np.array(faces, dtype=np.uint32)
+    return _CYLINDER_FACES_CACHE[n_segments]
 
 
 def generate_cylinder_mesh(
@@ -32,22 +60,8 @@ def generate_cylinder_mesh(
     v_top_center = np.array([[cx, cy, z_max]])
 
     vertices = np.vstack([v_bottom, v_top, v_bottom_center, v_top_center]).astype(np.float32)
-
-    idx_bot_c = 2 * n_segments
-    idx_top_c = 2 * n_segments + 1
-
-    faces = []
-    for i in range(n_segments):
-        next_i = (i + 1) % n_segments
-        # Side quad (2 triangles)
-        faces.append([i, n_segments + i, n_segments + next_i])
-        faces.append([i, n_segments + next_i, next_i])
-        # Bottom cap (viewed from bottom)
-        faces.append([idx_bot_c, next_i, i])
-        # Top cap (viewed from top)
-        faces.append([idx_top_c, n_segments + i, n_segments + next_i])
-
-    return vertices, np.array(faces, dtype=np.uint32)
+    faces = _get_cylinder_faces(n_segments)
+    return vertices, faces
 
 
 def generate_sphere_mesh(
@@ -107,130 +121,110 @@ def generate_sphere_mesh(
     return vertices_arr, faces_arr
 
 
-def generate_heightfield_cylinder_mesh(
-    radius: float,
-    z_floor: float,
-    surface_positions: Optional[np.ndarray] = None,
-    default_z_top: float = 0.078,
-    center: tuple[float, float] = (0.0, 0.0),
-    n_rings: int = 24,
-    n_spokes: int = 64,
+def _get_unit_sphere_template(n_lat: int = 12, n_lon: int = 24) -> tuple[np.ndarray, np.ndarray]:
+    """Return pre-computed unit sphere template vertices and faces."""
+    key = (n_lat, n_lon)
+    if key not in _UNIT_SPHERE_TEMPLATE_CACHE:
+        _UNIT_SPHERE_TEMPLATE_CACHE[key] = generate_sphere_mesh(
+            center=(0.0, 0.0, 0.0), radius=1.0, n_lat=n_lat, n_lon=n_lon
+        )
+    return _UNIT_SPHERE_TEMPLATE_CACHE[key]
+
+
+def generate_droplet_mesh(
+    center: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    radius: float = 0.0025,
+    n_lat: int = 12,
+    n_lon: int = 24,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generate a watertight 3D cylinder triangle mesh with a dynamic top surface heightfield."""
-    cx, cy = center
+    """Generate a watertight 3D fluid droplet mesh elongated along velocity or flattened on surface."""
+    radius = max(radius, 1e-4)
+    verts, faces = _get_unit_sphere_template(n_lat=n_lat, n_lon=n_lon)
+    vel_arr = np.asarray(velocity, dtype=np.float32)
+    speed = float(np.linalg.norm(vel_arr))
+
+    if speed > 0.03:
+        # Aerodynamic teardrop elongation along velocity vector (conserving volume)
+        v_dir = vel_arr / speed
+        aspect = 1.0 + min(1.0, speed * 0.7)
+        r_trans = 1.0 / np.sqrt(aspect)
+
+        # Scale along local Z by aspect, XY by r_trans
+        pts_scaled = verts.copy()
+        pts_scaled[:, 0] *= r_trans * radius
+        pts_scaled[:, 1] *= r_trans * radius
+        pts_scaled[:, 2] *= aspect * radius
+
+        # Rotate local Z axis (0, 0, 1) to v_dir
+        z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        v_cross = np.cross(z_axis, v_dir)
+        v_dot = float(np.dot(z_axis, v_dir))
+
+        if np.linalg.norm(v_cross) > 1e-5:
+            axis = v_cross / np.linalg.norm(v_cross)
+            angle = np.arccos(np.clip(v_dot, -1.0, 1.0))
+            k = np.array(
+                [[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]], dtype=np.float32
+            )
+            r_mat = np.eye(3, dtype=np.float32) + np.sin(angle) * k + (1.0 - np.cos(angle)) * (k @ k)
+            pts_rot = (r_mat @ pts_scaled.T).T
+        else:
+            sign = 1.0 if v_dot >= 0 else -1.0
+            pts_rot = pts_scaled * np.array([1.0, 1.0, sign], dtype=np.float32)
+
+        out_verts = pts_rot + np.asarray(center, dtype=np.float32)
+    else:
+        # Resting surface droplet (slightly oblate / flattened meniscus)
+        pts_scaled = verts.copy()
+        pts_scaled[:, 0] *= 1.15 * radius
+        pts_scaled[:, 1] *= 1.15 * radius
+        pts_scaled[:, 2] *= 0.75 * radius
+        out_verts = pts_scaled + np.asarray(center, dtype=np.float32)
+
+    return out_verts.astype(np.float32), faces
+
+
+def _get_cylinder_heightfield_template(
+    n_rings: int = 24, n_spokes: int = 64
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Return pre-computed template topology and sample coordinates for a heightfield cylinder mesh."""
+    key = (n_rings, n_spokes)
+    if key in _CYLINDER_HEIGHTFIELD_TEMPLATE_CACHE:
+        return _CYLINDER_HEIGHTFIELD_TEMPLATE_CACHE[key]
+
     spoke_angles = np.linspace(0.0, 2.0 * np.pi, n_spokes, endpoint=False)
     cos_s = np.cos(spoke_angles)
     sin_s = np.sin(spoke_angles)
 
-    # 1. Build 2D surface height grid from surface particles strictly within containing radius
-    nx, ny = 48, 48
-    x_min, x_max = cx - radius, cx + radius
-    y_min, y_max = cy - radius, cy + radius
-    dx = max(1e-4, (x_max - x_min) / nx)
-    dy = max(1e-4, (y_max - y_min) / ny)
-    grid_z = np.full((nx, ny), default_z_top, dtype=np.float32)
-
-    if surface_positions is not None and len(surface_positions) > 0:
-        d_center_sq = (surface_positions[:, 0] - cx) ** 2 + (surface_positions[:, 1] - cy) ** 2
-        in_bounds = (
-            (d_center_sq <= (radius + 1e-4) ** 2)
-            & (surface_positions[:, 2] >= z_floor)
-            & (surface_positions[:, 2] <= default_z_top + 0.015)
-        )
-        valid_pos = surface_positions[in_bounds]
-        if len(valid_pos) > 0:
-            ix = np.clip(np.floor((valid_pos[:, 0] - x_min) / dx).astype(int), 0, nx - 1)
-            iy = np.clip(np.floor((valid_pos[:, 1] - y_min) / dy).astype(int), 0, ny - 1)
-
-            grid_col_max = np.full((nx, ny), -1.0, dtype=np.float32)
-            np.maximum.at(grid_col_max, (ix, iy), valid_pos[:, 2])
-            has_samples = grid_col_max > 0.0
-
-            # Grid coordinates for radial profile inpainting
-            gx_coords = x_min + (np.arange(nx) + 0.5) * dx - cx
-            gy_coords = y_min + (np.arange(ny) + 0.5) * dy - cy
-            gx_grid, gy_grid = np.meshgrid(gx_coords, gy_coords, indexing="ij")
-            r_grid = np.sqrt(gx_grid**2 + gy_grid**2)
-
-            # 1. Radial profile inpainting for empty/unvisited cells (prevents false spike noise in vortex eye)
-            n_rbins = 16
-            r_bins = np.linspace(0, radius, n_rbins + 1)
-            r_bin_idx = np.clip(np.digitize(r_grid[has_samples], r_bins) - 1, 0, n_rbins - 1)
-            r_prof = np.zeros(n_rbins, dtype=np.float32)
-            r_prof_count = np.zeros(n_rbins, dtype=np.float32)
-            np.add.at(r_prof, r_bin_idx, grid_col_max[has_samples])
-            np.add.at(r_prof_count, r_bin_idx, 1.0)
-            r_prof = np.where(r_prof_count > 0, r_prof / np.maximum(1.0, r_prof_count), default_z_top)
-
-            r_grid_bin = np.clip(np.digitize(r_grid, r_bins) - 1, 0, n_rbins - 1)
-            radial_base = r_prof[r_grid_bin]
-            grid_filled = np.where(has_samples, grid_col_max, radial_base)
-
-            # 2. Multi-pass Gaussian smoothing across grid_z for organic, noise-free pool surface
-            grid_z = grid_filled.copy()
-            for _ in range(4):
-                pad = np.pad(grid_z, 1, mode="edge")
-                grid_z = (
-                    0.36 * pad[1:-1, 1:-1]
-                    + 0.11 * (pad[:-2, 1:-1] + pad[2:, 1:-1] + pad[1:-1, :-2] + pad[1:-1, 2:])
-                    + 0.05 * (pad[:-2, :-2] + pad[:-2, 2:] + pad[2:, :-2] + pad[2:, 2:])
-                )
-
-    def sample_z(x_arr: np.ndarray, y_arr: np.ndarray) -> np.ndarray:
-        gx = (x_arr - x_min) / dx - 0.5
-        gy = (y_arr - y_min) / dy - 0.5
-        i0 = np.clip(np.floor(gx).astype(int), 0, nx - 1)
-        i1 = np.clip(i0 + 1, 0, nx - 1)
-        j0 = np.clip(np.floor(gy).astype(int), 0, ny - 1)
-        j1 = np.clip(j0 + 1, 0, ny - 1)
-        fx = np.clip(gx - i0, 0.0, 1.0)
-        fy = np.clip(gy - j0, 0.0, 1.0)
-
-        z00 = grid_z[i0, j0]
-        z10 = grid_z[i1, j0]
-        z01 = grid_z[i0, j1]
-        z11 = grid_z[i1, j1]
-
-        z0 = z00 * (1.0 - fx) + z10 * fx
-        z1 = z01 * (1.0 - fx) + z11 * fx
-        return z0 * (1.0 - fy) + z1 * fy
-
-    # Top center vertex (index 0)
-    z_c = float(sample_z(np.array([cx]), np.array([cy]))[0])
-    v_top_center = [cx, cy, z_c]
-
-    # Top ring vertices (indices 1 .. n_rings * n_spokes)
-    top_vertices = [v_top_center]
-    r_steps = np.linspace(radius / n_rings, radius, n_rings)
+    sample_xy = [[0.0, 0.0]]
+    r_steps = np.linspace(1.0 / n_rings, 1.0, n_rings)
     for r in r_steps:
-        x_ring = cx + r * cos_s
-        y_ring = cy + r * sin_s
-        z_ring = sample_z(x_ring, y_ring)
         for s in range(n_spokes):
-            top_vertices.append([float(x_ring[s]), float(y_ring[s]), float(z_ring[s])])
+            sample_xy.append([float(r * cos_s[s]), float(r * sin_s[s])])
 
-    # Bottom ring vertices (outer ring at z_floor)
-    bot_ring_start = len(top_vertices)
+    sample_xy_arr = np.array(sample_xy, dtype=np.float32)
+    n_top = len(sample_xy_arr)
+
+    bot_xy = []
     for s in range(n_spokes):
-        x = float(cx + radius * cos_s[s])
-        y = float(cy + radius * sin_s[s])
-        top_vertices.append([x, y, z_floor])
+        bot_xy.append([float(cos_s[s]), float(sin_s[s]), 0.0])
+    bot_xy.append([0.0, 0.0, 0.0])
+    bot_xy_arr = np.array(bot_xy, dtype=np.float32)
 
-    # Bottom center vertex (last index)
-    bot_center_idx = len(top_vertices)
-    top_vertices.append([cx, cy, z_floor])
+    top_template_verts = np.column_stack([sample_xy_arr, np.zeros(n_top, dtype=np.float32)])
+    base_verts = np.vstack([top_template_verts, bot_xy_arr]).astype(np.float32)
 
-    vertices = np.array(top_vertices, dtype=np.float32)
+    bot_ring_start = n_top
+    bot_center_idx = n_top + n_spokes
 
     faces = []
-    # Inner ring triangles (connected to top center 0)
+    # Inner ring triangles
     for s in range(n_spokes):
         next_s = (s + 1) % n_spokes
-        v1 = 1 + s
-        v2 = 1 + next_s
-        faces.append([0, v1, v2])
+        faces.append([0, 1 + s, 1 + next_s])
 
-    # Intermediate ring quads (ring r to ring r+1)
+    # Intermediate ring quads
     for r in range(n_rings - 1):
         r1_start = 1 + r * n_spokes
         r2_start = 1 + (r + 1) * n_spokes
@@ -243,7 +237,7 @@ def generate_heightfield_cylinder_mesh(
             faces.append([p0, p1, p2])
             faces.append([p0, p2, p3])
 
-    # Side wall quads (connecting top outer ring to bottom ring)
+    # Side wall quads
     top_outer_start = 1 + (n_rings - 1) * n_spokes
     for s in range(n_spokes):
         next_s = (s + 1) % n_spokes
@@ -262,7 +256,109 @@ def generate_heightfield_cylinder_mesh(
         faces.append([bot_center_idx, b1, b0])
 
     faces_arr = np.array(faces, dtype=np.uint32)
-    return vertices, faces_arr
+    template = (base_verts, faces_arr, sample_xy_arr, bot_ring_start, bot_center_idx)
+    _CYLINDER_HEIGHTFIELD_TEMPLATE_CACHE[key] = template
+    return template
+
+
+@partial(jax.jit, static_argnums=(6, 7))
+def _compute_heightfield_surface_samples_jax(
+    pos: jnp.ndarray,
+    center_xy: jnp.ndarray,
+    radius: float,
+    z_floor: float,
+    default_z_top: float,
+    sample_xy: jnp.ndarray,
+    nx: int = 48,
+    ny: int = 48,
+) -> jnp.ndarray:
+    """Reconstruct 2D surface heightfield and sample heights at arbitrary XY coordinates via JAX."""
+    x_min, x_max = center_xy[0] - radius, center_xy[0] + radius
+    y_min, y_max = center_xy[1] - radius, center_xy[1] + radius
+    dx = (x_max - x_min) / nx
+    dy = (y_max - y_min) / ny
+
+    d_sq = (pos[:, 0] - center_xy[0]) ** 2 + (pos[:, 1] - center_xy[1]) ** 2
+    in_bounds = (d_sq <= radius**2) & (pos[:, 2] >= z_floor) & (pos[:, 2] <= default_z_top + 0.015)
+    ix = jnp.clip(jnp.floor((pos[:, 0] - x_min) / dx).astype(jnp.int32), 0, nx - 1)
+    iy = jnp.clip(jnp.floor((pos[:, 1] - y_min) / dy).astype(jnp.int32), 0, ny - 1)
+
+    z_vals = jnp.where(in_bounds, pos[:, 2], -1.0)
+    grid_max = jnp.full((nx, ny), -1.0, dtype=jnp.float32).at[ix, iy].max(z_vals)
+    has_samples = grid_max > 0.0
+
+    gx = x_min + (jnp.arange(nx) + 0.5) * dx - center_xy[0]
+    gy = y_min + (jnp.arange(ny) + 0.5) * dy - center_xy[1]
+    gx_grid, gy_grid = jnp.meshgrid(gx, gy, indexing="ij")
+    r_grid = jnp.sqrt(gx_grid**2 + gy_grid**2)
+
+    n_rbins = 16
+    dr = radius / n_rbins
+    r_bin_idx = jnp.clip(jnp.floor(r_grid / dr).astype(jnp.int32), 0, n_rbins - 1)
+    r_prof_sum = jnp.zeros(n_rbins, dtype=jnp.float32).at[r_bin_idx].add(jnp.where(has_samples, grid_max, 0.0))
+    r_prof_cnt = jnp.zeros(n_rbins, dtype=jnp.float32).at[r_bin_idx].add(jnp.where(has_samples, 1.0, 0.0))
+    r_prof = jnp.where(r_prof_cnt > 0, r_prof_sum / jnp.maximum(1.0, r_prof_cnt), default_z_top)
+    radial_base = r_prof[r_bin_idx]
+    grid_z = jnp.where(has_samples, grid_max, radial_base)
+
+    for _ in range(4):
+        pad = jnp.pad(grid_z, ((1, 1), (1, 1)), mode="edge")
+        grid_z = (
+            0.36 * pad[1:-1, 1:-1]
+            + 0.11 * (pad[:-2, 1:-1] + pad[2:, 1:-1] + pad[1:-1, :-2] + pad[1:-1, 2:])
+            + 0.05 * (pad[:-2, :-2] + pad[:-2, 2:] + pad[2:, :-2] + pad[2:, 2:])
+        )
+
+    gx_s = (sample_xy[:, 0] - x_min) / dx - 0.5
+    gy_s = (sample_xy[:, 1] - y_min) / dy - 0.5
+    i0 = jnp.clip(jnp.floor(gx_s).astype(jnp.int32), 0, nx - 1)
+    i1 = jnp.clip(i0 + 1, 0, nx - 1)
+    j0 = jnp.clip(jnp.floor(gy_s).astype(jnp.int32), 0, ny - 1)
+    j1 = jnp.clip(j0 + 1, 0, ny - 1)
+    fx = jnp.clip(gx_s - i0, 0.0, 1.0)
+    fy = jnp.clip(gy_s - j0, 0.0, 1.0)
+
+    z00 = grid_z[i0, j0]
+    z10 = grid_z[i1, j0]
+    z01 = grid_z[i0, j1]
+    z11 = grid_z[i1, j1]
+
+    z0 = z00 * (1.0 - fx) + z10 * fx
+    z1 = z01 * (1.0 - fx) + z11 * fx
+    return z0 * (1.0 - fy) + z1 * fy
+
+
+def generate_heightfield_cylinder_mesh(
+    radius: float,
+    z_floor: float,
+    surface_positions: Optional[np.ndarray] = None,
+    default_z_top: float = 0.078,
+    center: tuple[float, float] = (0.0, 0.0),
+    n_rings: int = 24,
+    n_spokes: int = 64,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a watertight 3D cylinder triangle mesh with a dynamic top surface heightfield."""
+    base_verts, faces_arr, sample_xy_arr, bot_ring_start, _ = _get_cylinder_heightfield_template(n_rings, n_spokes)
+    cx, cy = center
+    n_top = len(sample_xy_arr)
+
+    verts = base_verts.copy()
+    verts[:, 0] = cx + verts[:, 0] * radius
+    verts[:, 1] = cy + verts[:, 1] * radius
+    verts[bot_ring_start:, 2] = z_floor
+
+    if surface_positions is not None and len(surface_positions) > 0:
+        pos_jax = jnp.asarray(surface_positions, dtype=jnp.float32)
+        center_jax = jnp.array([cx, cy], dtype=jnp.float32)
+        sample_xy_world = jnp.asarray(verts[:n_top, :2], dtype=jnp.float32)
+        z_samples = _compute_heightfield_surface_samples_jax(
+            pos_jax, center_jax, float(radius), float(z_floor), float(default_z_top), sample_xy_world
+        )
+        verts[:n_top, 2] = np.asarray(z_samples)
+    else:
+        verts[:n_top, 2] = default_z_top
+
+    return verts, faces_arr
 
 
 def generate_box_mesh(
@@ -313,6 +409,7 @@ def generate_box_mesh(
 def generate_manifold_mesh_around_particles(
     positions: np.ndarray,
     r_s: float = 0.0025,
+    velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Construct a watertight 3D manifold triangle mesh wrapped tightly around particle coordinates."""
     if positions is None or len(positions) == 0:
@@ -323,7 +420,7 @@ def generate_manifold_mesh_around_particles(
 
     if len(positions) < 4:
         centroid = tuple(float(x) for x in np.mean(positions, axis=0))
-        return generate_sphere_mesh(center=centroid, radius=equiv_radius)
+        return generate_droplet_mesh(center=centroid, velocity=velocity, radius=equiv_radius)
 
     try:
         from scipy.spatial import ConvexHull
@@ -340,7 +437,7 @@ def generate_manifold_mesh_around_particles(
         # Volume inflation & vertical span guardrail: prevent sparse droplets from producing huge hollow/tall volumes
         if hull.volume > 2.5 * vol or z_span > max(0.010, r_s * 4.0):
             centroid = tuple(float(x) for x in np.mean(positions, axis=0))
-            return generate_sphere_mesh(center=centroid, radius=equiv_radius)
+            return generate_droplet_mesh(center=centroid, velocity=velocity, radius=equiv_radius)
 
         unique_indices = np.unique(hull.simplices)
         index_map = {orig: new for new, orig in enumerate(unique_indices)}
@@ -351,7 +448,27 @@ def generate_manifold_mesh_around_particles(
         centroid = tuple(float(x) for x in np.mean(positions, axis=0))
         max_extent = min(float(np.max(np.linalg.norm(positions - centroid, axis=1))) + r_s, equiv_radius * 1.3)
         safe_radius = max(equiv_radius, max_extent)
-        return generate_sphere_mesh(center=centroid, radius=safe_radius)
+        return generate_droplet_mesh(center=centroid, velocity=velocity, radius=safe_radius)
+
+
+def _get_lip_waterfall_faces(n_segments: int = 32) -> np.ndarray:
+    """Return pre-computed face index array for an annular lip waterfall mesh."""
+    if n_segments not in _LIP_WATERFALL_FACES_CACHE:
+        faces = []
+        r2_offset = 2 * n_segments
+        r3_offset = 3 * n_segments
+        for seg in range(n_segments):
+            next_seg = (seg + 1) % n_segments
+            faces.append([seg, next_seg, n_segments + next_seg])
+            faces.append([seg, n_segments + next_seg, n_segments + seg])
+            faces.append([seg, r2_offset + seg, r2_offset + next_seg])
+            faces.append([seg, r2_offset + next_seg, next_seg])
+            faces.append([n_segments + seg, n_segments + next_seg, r3_offset + next_seg])
+            faces.append([n_segments + seg, r3_offset + next_seg, r3_offset + seg])
+            faces.append([r2_offset + seg, r3_offset + seg, r3_offset + next_seg])
+            faces.append([r2_offset + seg, r3_offset + next_seg, r2_offset + next_seg])
+        _LIP_WATERFALL_FACES_CACHE[n_segments] = np.array(faces, dtype=np.uint32)
+    return _LIP_WATERFALL_FACES_CACHE[n_segments]
 
 
 def generate_lip_waterfall_mesh(
@@ -374,47 +491,39 @@ def generate_lip_waterfall_mesh(
     r_out_bot = lip_radius + 0.002
     r_in_bot = max(0.005, lip_radius - thickness + 0.002)
 
-    vertices = []
-    for seg in range(n_segments):
-        vertices.append([cx + r_out_top * cos_t[seg], cy + r_out_top * sin_t[seg], z_top])
-    for seg in range(n_segments):
-        vertices.append([cx + r_in_top * cos_t[seg], cy + r_in_top * sin_t[seg], z_top])
-    for seg in range(n_segments):
-        vertices.append([cx + r_out_bot * cos_t[seg], cy + r_out_bot * sin_t[seg], z_bot])
-    for seg in range(n_segments):
-        vertices.append([cx + r_in_bot * cos_t[seg], cy + r_in_bot * sin_t[seg], z_bot])
+    v_top_out = np.column_stack([cx + r_out_top * cos_t, cy + r_out_top * sin_t, np.full(n_segments, z_top)])
+    v_top_in = np.column_stack([cx + r_in_top * cos_t, cy + r_in_top * sin_t, np.full(n_segments, z_top)])
+    v_bot_out = np.column_stack([cx + r_out_bot * cos_t, cy + r_out_bot * sin_t, np.full(n_segments, z_bot)])
+    v_bot_in = np.column_stack([cx + r_in_bot * cos_t, cy + r_in_bot * sin_t, np.full(n_segments, z_bot)])
 
-    vertices_arr = np.array(vertices, dtype=np.float32)
-    faces = []
-
-    # Top annular cap
-    for seg in range(n_segments):
-        next_seg = (seg + 1) % n_segments
-        faces.append([seg, next_seg, n_segments + next_seg])
-        faces.append([seg, n_segments + next_seg, n_segments + seg])
-
-    # Outer cylindrical curtain
-    r2_offset = 2 * n_segments
-    for seg in range(n_segments):
-        next_seg = (seg + 1) % n_segments
-        faces.append([seg, r2_offset + seg, r2_offset + next_seg])
-        faces.append([seg, r2_offset + next_seg, next_seg])
-
-    # Inner cylindrical curtain
-    r3_offset = 3 * n_segments
-    for seg in range(n_segments):
-        next_seg = (seg + 1) % n_segments
-        faces.append([n_segments + seg, n_segments + next_seg, r3_offset + next_seg])
-        faces.append([n_segments + seg, r3_offset + next_seg, r3_offset + seg])
-
-    # Bottom annular cap
-    for seg in range(n_segments):
-        next_seg = (seg + 1) % n_segments
-        faces.append([r2_offset + seg, r3_offset + seg, r3_offset + next_seg])
-        faces.append([r2_offset + seg, r3_offset + next_seg, r2_offset + next_seg])
-
-    faces_arr = np.array(faces, dtype=np.uint32)
+    vertices_arr = np.vstack([v_top_out, v_top_in, v_bot_out, v_bot_in]).astype(np.float32)
+    faces_arr = _get_lip_waterfall_faces(n_segments)
     return vertices_arr, faces_arr
+
+
+def _get_waterfall_faces(n_slices: int = 16, n_segments: int = 24) -> np.ndarray:
+    """Return pre-computed face index array for a spine waterfall tube mesh."""
+    key = (n_slices, n_segments)
+    if key not in _WATERFALL_FACES_CACHE:
+        faces = []
+        bot_center_idx = n_slices * n_segments
+        top_center_idx = n_slices * n_segments + 1
+        for i in range(n_slices - 1):
+            r1 = i * n_segments
+            r2 = (i + 1) * n_segments
+            for seg in range(n_segments):
+                next_seg = (seg + 1) % n_segments
+                faces.append([r1 + seg, r2 + seg, r2 + next_seg])
+                faces.append([r1 + seg, r2 + next_seg, r1 + next_seg])
+        for seg in range(n_segments):
+            next_seg = (seg + 1) % n_segments
+            faces.append([bot_center_idx, next_seg, seg])
+        top_ring_start = (n_slices - 1) * n_segments
+        for seg in range(n_segments):
+            next_seg = (seg + 1) % n_segments
+            faces.append([top_center_idx, top_ring_start + seg, top_ring_start + next_seg])
+        _WATERFALL_FACES_CACHE[key] = np.array(faces, dtype=np.uint32)
+    return _WATERFALL_FACES_CACHE[key]
 
 
 def generate_waterfall_mesh(
@@ -459,42 +568,47 @@ def generate_waterfall_mesh(
     cos_t = np.cos(theta)
     sin_t = np.sin(theta)
 
-    vertices = []
-    for i in range(n_slices):
-        z = z_slices[i]
-        sx = spine_x[i]
-        sy = spine_y[i]
-        r = radii[i]
-        for seg in range(n_segments):
-            vertices.append([sx + r * cos_t[seg], sy + r * sin_t[seg], z])
+    sx_arr = np.array(spine_x, dtype=np.float32)[:, None]
+    sy_arr = np.array(spine_y, dtype=np.float32)[:, None]
+    r_arr = np.array(radii, dtype=np.float32)[:, None]
+    z_arr = np.array(z_slices, dtype=np.float32)[:, None]
 
-    bot_center_idx = len(vertices)
-    vertices.append([spine_x[0], spine_y[0], z_bot])
-    top_center_idx = len(vertices)
-    vertices.append([spine_x[-1], spine_y[-1], z_top])
+    v_rings_x = (sx_arr + r_arr * cos_t[None, :]).ravel()
+    v_rings_y = (sy_arr + r_arr * sin_t[None, :]).ravel()
+    v_rings_z = (z_arr * np.ones((1, n_segments), dtype=np.float32)).ravel()
 
-    vertices_arr = np.array(vertices, dtype=np.float32)
+    v_rings = np.column_stack([v_rings_x, v_rings_y, v_rings_z])
+    bot_cap = np.array([[spine_x[0], spine_y[0], z_bot]], dtype=np.float32)
+    top_cap = np.array([[spine_x[-1], spine_y[-1], z_top]], dtype=np.float32)
 
-    faces = []
-    for i in range(n_slices - 1):
-        r1 = i * n_segments
-        r2 = (i + 1) * n_segments
-        for seg in range(n_segments):
-            next_seg = (seg + 1) % n_segments
-            faces.append([r1 + seg, r2 + seg, r2 + next_seg])
-            faces.append([r1 + seg, r2 + next_seg, r1 + next_seg])
-
-    for seg in range(n_segments):
-        next_seg = (seg + 1) % n_segments
-        faces.append([bot_center_idx, next_seg, seg])
-
-    top_ring_start = (n_slices - 1) * n_segments
-    for seg in range(n_segments):
-        next_seg = (seg + 1) % n_segments
-        faces.append([top_center_idx, top_ring_start + seg, top_ring_start + next_seg])
-
-    faces_arr = np.array(faces, dtype=np.uint32)
+    vertices_arr = np.vstack([v_rings, bot_cap, top_cap]).astype(np.float32)
+    faces_arr = _get_waterfall_faces(n_slices, n_segments)
     return vertices_arr, faces_arr
+
+
+def _get_arc_waterfall_faces(n_segments: int = 16) -> np.ndarray:
+    """Return pre-computed face index array for an arc waterfall mesh."""
+    if n_segments not in _ARC_WATERFALL_FACES_CACHE:
+        faces = []
+        r2_offset = 2 * n_segments
+        r3_offset = 3 * n_segments
+        for seg in range(n_segments - 1):
+            next_seg = seg + 1
+            faces.append([seg, n_segments + next_seg, next_seg])
+            faces.append([seg, n_segments + seg, n_segments + next_seg])
+            faces.append([seg, r2_offset + next_seg, r2_offset + seg])
+            faces.append([seg, next_seg, r2_offset + next_seg])
+            faces.append([n_segments + seg, r3_offset + next_seg, n_segments + next_seg])
+            faces.append([n_segments + seg, r3_offset + seg, r3_offset + next_seg])
+            faces.append([r2_offset + seg, r3_offset + seg, r3_offset + next_seg])
+            faces.append([r2_offset + seg, r3_offset + next_seg, r2_offset + next_seg])
+        faces.append([0, r3_offset, n_segments])
+        faces.append([0, r2_offset, r3_offset])
+        last = n_segments - 1
+        faces.append([last, n_segments + last, r3_offset + last])
+        faces.append([last, r3_offset + last, r2_offset + last])
+        _ARC_WATERFALL_FACES_CACHE[n_segments] = np.array(faces, dtype=np.uint32)
+    return _ARC_WATERFALL_FACES_CACHE[n_segments]
 
 
 def generate_arc_waterfall_mesh(
@@ -520,56 +634,13 @@ def generate_arc_waterfall_mesh(
     sin_t = np.sin(theta)
     cos_t = np.cos(theta)
 
-    vertices = []
-    for seg in range(n_segments):
-        vertices.append([cx + r_out * sin_t[seg], cy + r_out * cos_t[seg], z_top])
-    for seg in range(n_segments):
-        vertices.append([cx + r_in * sin_t[seg], cy + r_in * cos_t[seg], z_top])
-    for seg in range(n_segments):
-        vertices.append([cx + r_out * sin_t[seg], cy + r_out * cos_t[seg], z_bot])
-    for seg in range(n_segments):
-        vertices.append([cx + r_in * sin_t[seg], cy + r_in * cos_t[seg], z_bot])
+    v_top_out = np.column_stack([cx + r_out * sin_t, cy + r_out * cos_t, np.full(n_segments, z_top)])
+    v_top_in = np.column_stack([cx + r_in * sin_t, cy + r_in * cos_t, np.full(n_segments, z_top)])
+    v_bot_out = np.column_stack([cx + r_out * sin_t, cy + r_out * cos_t, np.full(n_segments, z_bot)])
+    v_bot_in = np.column_stack([cx + r_in * sin_t, cy + r_in * cos_t, np.full(n_segments, z_bot)])
 
-    vertices_arr = np.array(vertices, dtype=np.float32)
-    faces = []
-
-    r2_offset = 2 * n_segments
-    r3_offset = 3 * n_segments
-
-    # 1. Top Annular Cap
-    for seg in range(n_segments - 1):
-        next_seg = seg + 1
-        faces.append([seg, n_segments + next_seg, next_seg])
-        faces.append([seg, n_segments + seg, n_segments + next_seg])
-
-    # 2. Outer Curtain
-    for seg in range(n_segments - 1):
-        next_seg = seg + 1
-        faces.append([seg, r2_offset + next_seg, r2_offset + seg])
-        faces.append([seg, next_seg, r2_offset + next_seg])
-
-    # 3. Inner Curtain
-    for seg in range(n_segments - 1):
-        next_seg = seg + 1
-        faces.append([n_segments + seg, r3_offset + next_seg, n_segments + next_seg])
-        faces.append([n_segments + seg, r3_offset + seg, r3_offset + next_seg])
-
-    # 4. Bottom Annular Cap
-    for seg in range(n_segments - 1):
-        next_seg = seg + 1
-        faces.append([r2_offset + seg, r3_offset + seg, r3_offset + next_seg])
-        faces.append([r2_offset + seg, r3_offset + next_seg, r2_offset + next_seg])
-
-    # 5. Left End Cap (seg = 0)
-    faces.append([0, r3_offset, n_segments])
-    faces.append([0, r2_offset, r3_offset])
-
-    # 6. Right End Cap (seg = n_segments - 1)
-    last = n_segments - 1
-    faces.append([last, n_segments + last, r3_offset + last])
-    faces.append([last, r3_offset + last, r2_offset + last])
-
-    faces_arr = np.array(faces, dtype=np.uint32)
+    vertices_arr = np.vstack([v_top_out, v_top_in, v_bot_out, v_bot_in]).astype(np.float32)
+    faces_arr = _get_arc_waterfall_faces(n_segments)
     return vertices_arr, faces_arr
 
 
@@ -1279,11 +1350,14 @@ class FluidBody(BaseModel):
                     if self.cad_context is not None and hasattr(self.cad_context, "r_s") and self.cad_context.r_s > 0.0
                     else 0.0025
                 )
+                vel = self.velocity if self.velocity is not None else (0.0, 0.0, 0.0)
                 if self.surface_positions is not None and len(self.surface_positions) >= 4:
-                    return generate_manifold_mesh_around_particles(self.surface_positions, r_s=r_val)
-                equiv_radius = max(0.002, (3.0 * max(1e-9, self.volume) / (4.0 * math.pi)) ** (1.0 / 3.0))
-                equiv_radius = min(equiv_radius, max(0.004, (self.bounds_max[2] - self.bounds_min[2]) / 2.0))
-                return generate_sphere_mesh(center=self.centroid, radius=equiv_radius, n_lat=10, n_lon=20)
+                    return generate_manifold_mesh_around_particles(self.surface_positions, r_s=r_val, velocity=vel)
+                equiv_radius = max(0.0015, (3.0 * max(1e-9, self.volume) / (4.0 * math.pi)) ** (1.0 / 3.0))
+                equiv_radius = min(equiv_radius, max(0.0035, (self.bounds_max[2] - self.bounds_min[2]) / 2.0))
+                return generate_droplet_mesh(
+                    center=self.centroid, velocity=vel, radius=equiv_radius, n_lat=12, n_lon=24
+                )
 
     def to_cad_solid(self) -> Any:
         """Build and return a watertight build123d Solid representation conforming to CAD design principles."""
