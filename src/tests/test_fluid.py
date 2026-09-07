@@ -1501,3 +1501,52 @@ def test_voxel_masks_consistent_with_surface_bounds():
     assert processed.b_params[2, BoundaryParam.DRAIN_INFLUENCE_RADIUS] == lid_surf.drain_influence_radius
     assert processed.b_params[2, BoundaryParam.DRAIN_EDGE_R_MIN] == lid_surf.drain_edge_r_min
     assert processed.b_params[2, BoundaryParam.DRAIN_EDGE_R_MAX] == lid_surf.drain_edge_r_max
+
+
+def test_surface_smoothing_polynomial_coefficients_config():
+    """Verify that surface smoothing polynomial coefficients are parameterized in FluidConfig and evaluated properly in JAX."""
+    import jax.numpy as jnp
+    from model.fluid_config import FluidConfig
+    from provider.fluid import _compute_dynamic_fluid_bodies_jax
+
+    # 1. Test FluidConfig parameters
+    config = FluidConfig(
+        surface_smooth_center_coeff=6.0,
+        surface_smooth_neighbor_coeff=3.0,
+        surface_smooth_diagonal_coeff=1.5,
+    )
+    assert config.surface_smooth_center_coeff == 6.0
+    assert config.surface_smooth_neighbor_coeff == 3.0
+    assert config.surface_smooth_diagonal_coeff == 1.5
+
+    # 2. Test JAX evaluation with custom smoothing polynomial weights
+    pos_local = jnp.array(
+        [
+            [0.0, 0.0, 0.045],
+            [0.005, 0.0, 0.046],
+            [0.0, 0.005, 0.044],
+            [0.005, 0.005, 0.045],
+        ]
+    )
+    dx = 0.005
+    origin = jnp.array([-0.05, -0.05, 0.0])
+
+    in_fluid_body, p_surf_z, level_grad_local, p_col_count = _compute_dynamic_fluid_bodies_jax(
+        pos_local,
+        dx,
+        origin,
+        nx=20,
+        ny=20,
+        nz=20,
+        cavity_floor_z=0.040,
+        z_max_pool=0.080,
+        r_s=0.002,
+        c_center=config.surface_smooth_center_coeff,
+        c_neighbor=config.surface_smooth_neighbor_coeff,
+        c_diagonal=config.surface_smooth_diagonal_coeff,
+    )
+
+    assert p_surf_z.shape == (4,)
+    assert jnp.all(p_surf_z >= 0.040)
+    assert level_grad_local.shape == (4, 3)
+    assert in_fluid_body.shape == (4,)
