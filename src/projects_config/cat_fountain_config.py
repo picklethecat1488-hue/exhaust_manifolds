@@ -753,6 +753,11 @@ class CatFountainConfig(BaseModel):
         return float(self._raw_data.get("pump_cover_snap_clearance", 0.45))
 
     @cached_property
+    def pump_cover_lip_thickness(self) -> float:
+        """Return the thickness of the pump cover downward lip."""
+        return float(self._raw_data.get("pump_cover_lip_thickness", 1.5))
+
+    @cached_property
     def pump_cover_internal_clearance(self) -> float:
         """Return the extra radial clearance inside the pump cover over the volute chamber."""
         return float(self._raw_data.get("pump_cover_internal_clearance", 0.40))

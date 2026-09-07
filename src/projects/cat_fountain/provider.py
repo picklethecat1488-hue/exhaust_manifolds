@@ -1115,6 +1115,8 @@ class CatFountainProvider(Provider):
         inlet_w = self.settings.pump_inlet_width
         inlet_h = self.settings.pump_inlet_height
         clip_opening_w = self.settings.pump_cover_clip_opening_width
+        lip_thickness = self.settings.pump_cover_lip_thickness
+        lip_in_r = cover_r - lip_thickness
 
         with BuildPart() as cover:
             # 1. Main casing cap over impeller volute (Z = 0 at casing top rim)
@@ -1123,7 +1125,7 @@ class CatFountainProvider(Provider):
                 # Downward lip entering casing snap recess (Z = -1.5 to 0) with tapered entry chamfer
                 with Locations((0, 0, -1.5)):
                     Cone(
-                        bottom_radius=cover_r - 0.5,
+                        bottom_radius=cover_r - 0.3,
                         top_radius=cover_r,
                         height=1.5,
                         align=(Align.CENTER, Align.CENTER, Align.MIN),
@@ -1131,11 +1133,11 @@ class CatFountainProvider(Provider):
 
             # 2. Tube sleeve sliding down the vertical delivery tube
             with Locations((tube_x, tube_y, 0)):
-                Cylinder(radius=tube_r + 2.0, height=sleeve_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
+                Cylinder(radius=tube_r + 2.5, height=sleeve_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
 
             # 3. Connecting bridge between casing cap and tube sleeve
             with Locations((0, tube_y / 2.0, 0)):
-                Box(tube_r * 2.0 + 4.0, tube_y, cover_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
+                Box(tube_r * 2.0 + 5.0, tube_y, cover_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
 
             # 4. Subtract vertical tube bore through sleeve with bottom entry lead-in cone
             with Locations((tube_x, tube_y, -2.0)):
@@ -1147,9 +1149,9 @@ class CatFountainProvider(Provider):
                 )
                 with Locations((0, 0, 0)):
                     Cone(
-                        bottom_radius=tube_r + tube_clearance + 1.2,
+                        bottom_radius=tube_r + tube_clearance + 0.6,
                         top_radius=tube_r + tube_clearance,
-                        height=2.0,
+                        height=1.5,
                         align=(Align.CENTER, Align.CENTER, Align.MIN),
                         mode=Mode.SUBTRACT,
                     )
@@ -1166,16 +1168,16 @@ class CatFountainProvider(Provider):
                     )
 
             # 6. Subtract internal impeller / guide post clearance cavity inside casing cap
-            with Locations((0, 0, -2.0)):
+            with Locations((0, 0, -1.5)):
                 Cylinder(
-                    radius=chamber_r + internal_clearance,
-                    height=cover_h + 0.5,
+                    radius=lip_in_r,
+                    height=cover_h,
                     align=(Align.CENTER, Align.CENTER, Align.MIN),
                     mode=Mode.SUBTRACT,
                 )
 
             # 7. Side water intake window on South face (opposite the tube: Y < 0)
-            with Locations((0, -casing_r + 2.0, -1.5)):
+            with Locations((0, -casing_r + 2.0, 0.0)):
                 Box(
                     inlet_w,
                     10.0,
@@ -1205,7 +1207,7 @@ class CatFountainProvider(Provider):
                     xyz=(0.0, 0.0, 0.0),
                     rpy=(0.0, 0.0, 0.0),
                     has_intake=True,
-                    intake_pos=(0.0, -casing_r * 0.001, (inlet_h / 2.0 - 1.5) * 0.001),
+                    intake_pos=(0.0, -casing_r * 0.001, (inlet_h / 2.0) * 0.001),
                     intake_normal=(0.0, -1.0, 0.0),
                     intake_radius=min(inlet_w, inlet_h) * 0.5 * 0.001,
                     has_drain=False,
