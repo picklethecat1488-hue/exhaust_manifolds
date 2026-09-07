@@ -106,10 +106,11 @@ def reconstruct_boundary_cad_solid(b: Any, parent_location: Optional[b3d.Locatio
             vane_t = (getattr(b, "vane_thickness", 0.0) or 0.0) * 1000.0
             shaft_r = (getattr(b, "thickness", 0.0) or 0.0) * 1000.0
             hub_h = h * 0.5 if h > 0.0 else 0.0
+            hub_r = max(0.0, r_out - 4.0)
             with b3d.BuildPart() as p:
                 # Hub body base
                 b3d.Cylinder(
-                    radius=max(0.0, r_out - 4.0),
+                    radius=hub_r,
                     height=hub_h,
                     align=(b3d.Align.CENTER, b3d.Align.CENTER, b3d.Align.MIN),
                 )
@@ -127,18 +128,21 @@ def reconstruct_boundary_cad_solid(b: Any, parent_location: Optional[b3d.Locatio
                         align=(b3d.Align.CENTER, b3d.Align.CENTER, b3d.Align.MIN),
                         mode=b3d.Mode.SUBTRACT,
                     )
-                # Radial blades extending across the hub
+                # Radial blades extending from central sleeve to hub perimeter
+                sleeve_r = shaft_r + 2.0 if shaft_r > 0.0 else 4.5
                 if num_vanes > 0 and vane_t > 0.0 and hub_h < h:
+                    blade_len = max(0.0, hub_r - sleeve_r)
                     with b3d.Locations((0, 0, hub_h)):
                         for v_idx in range(num_vanes):
                             v_angle = (360.0 / num_vanes) * v_idx
                             with b3d.Locations(b3d.Rot(0, 0, v_angle)):
-                                b3d.Box(
-                                    max(0.0, (r_out - 4.0) * 2.0),
-                                    vane_t,
-                                    h - hub_h,
-                                    align=(b3d.Align.CENTER, b3d.Align.CENTER, b3d.Align.MIN),
-                                )
+                                with b3d.Locations((sleeve_r, 0, 0)):
+                                    b3d.Box(
+                                        blade_len,
+                                        vane_t,
+                                        h - hub_h,
+                                        align=(b3d.Align.MIN, b3d.Align.CENTER, b3d.Align.MIN),
+                                    )
             return p.part.located(loc)
 
         case _:

@@ -904,6 +904,7 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
         particle_colors: Optional[list[list[float]]] = None,
         particle_radii: Optional[list[float]] = None,
         boundary_voxels: Optional[dict[str, Any]] = None,
+        water_meshes: Optional[dict[str, Any]] = None,
         step_idx: Optional[int] = None,
     ) -> None:
         """Log the given state data to Rerun."""
@@ -921,8 +922,22 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
                 ),
             )
 
-        # Log particles using vectorized numpy operations for high performance
-        if particle_positions is not None and len(particle_positions) > 0:
+        # 1. Log transparent CAD solid water meshes
+        if water_meshes is not None and len(water_meshes) > 0:
+            for name, (verts, faces) in water_meshes.items():
+                if len(verts) > 0 and len(faces) > 0:
+                    rr.log(
+                        f"world/water/{name}",
+                        rr.Mesh3D(
+                            vertex_positions=verts,
+                            triangle_indices=faces,
+                            albedo_factor=[50, 160, 240, 110],  # Transparent aquatic blue (alpha ~ 0.43)
+                        ),
+                    )
+
+        # 2. Log particles using vectorized numpy operations (gated on SHOW_WATER_VOXELS environment variable)
+        enable_water_voxels = get_env_bool("SHOW_WATER_VOXELS", False)
+        if enable_water_voxels and particle_positions is not None and len(particle_positions) > 0:
             pos_arr = np.asarray(particle_positions)
             active_mask = pos_arr[:, 2] < 100.0
             if np.any(active_mask):
