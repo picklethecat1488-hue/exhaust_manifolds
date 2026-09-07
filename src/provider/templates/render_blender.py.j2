@@ -5,6 +5,7 @@ import os
 import sys
 import traceback
 import mathutils
+import numpy as np
 
 try:
     with open(r"{{ scene_data_path }}", "r", encoding="utf-8") as f:
@@ -40,6 +41,60 @@ try:
             scene.eevee.use_fast_gi = True
     if hasattr(scene, "cycles"):
         scene.cycles.samples = {{ samples }}
+        cycles_addon = bpy.context.preferences.addons.get("cycles")
+        if cycles_addon:
+            cprefs = cycles_addon.preferences
+            device_types = [item[0] for item in cprefs.get_device_types(bpy.context)]
+            for dev_type in ("OPTIX", "CUDA"):
+                if dev_type in device_types:
+                    cprefs.compute_device_type = dev_type
+                    cprefs.get_devices()
+                    gpu_devices = [d for d in cprefs.devices if d.type == dev_type]
+                    if gpu_devices:
+                        for d in cprefs.devices:
+                            d.use = (d.type == dev_type)
+                        scene.cycles.device = "GPU"
+                        break
+
+        # Configure OptiX / OpenImageDenoise AI Denoising
+        if hasattr(scene.cycles, "use_denoising"):
+            scene.cycles.use_denoising = True
+            if hasattr(scene.cycles, "denoising_use_gpu"):
+                scene.cycles.denoising_use_gpu = True
+            if hasattr(scene.cycles, "denoiser") and "denoiser" in scene.cycles.bl_rna.properties:
+                denoiser_props = [item.identifier for item in scene.cycles.bl_rna.properties["denoiser"].enum_items]
+                if "OPTIX" in denoiser_props and cycles_addon and cycles_addon.preferences.compute_device_type == "OPTIX":
+                    scene.cycles.denoiser = "OPTIX"
+                elif "OPENIMAGEDENOISE" in denoiser_props:
+                    scene.cycles.denoiser = "OPENIMAGEDENOISE"
+            if hasattr(scene.cycles, "denoising_input_passes") and "denoising_input_passes" in scene.cycles.bl_rna.properties:
+                pass_props = [item.identifier for item in scene.cycles.bl_rna.properties["denoising_input_passes"].enum_items]
+                if "RGB_ALBEDO_NORMAL" in pass_props:
+                    scene.cycles.denoising_input_passes = "RGB_ALBEDO_NORMAL"
+            if hasattr(scene.cycles, "denoising_prefilter") and "denoising_prefilter" in scene.cycles.bl_rna.properties:
+                scene.cycles.denoising_prefilter = "FAST"
+
+        # Optimize Ray Tree Depth & Light Clamping for High-Throughput Raytracing
+        if hasattr(scene.cycles, "max_bounces"):
+            scene.cycles.max_bounces = 8
+        if hasattr(scene.cycles, "diffuse_bounces"):
+            scene.cycles.diffuse_bounces = 2
+        if hasattr(scene.cycles, "glossy_bounces"):
+            scene.cycles.glossy_bounces = 4
+        if hasattr(scene.cycles, "transmission_bounces"):
+            scene.cycles.transmission_bounces = 6
+        if hasattr(scene.cycles, "transparent_max_bounces"):
+            scene.cycles.transparent_max_bounces = 6
+        if hasattr(scene.cycles, "volume_bounces"):
+            scene.cycles.volume_bounces = 0
+        if hasattr(scene.cycles, "sample_clamp_indirect"):
+            scene.cycles.sample_clamp_indirect = 10.0
+        if hasattr(scene.cycles, "use_adaptive_sampling"):
+            scene.cycles.use_adaptive_sampling = True
+            if hasattr(scene.cycles, "adaptive_threshold"):
+                scene.cycles.adaptive_threshold = 0.015
+            if hasattr(scene.cycles, "adaptive_min_samples"):
+                scene.cycles.adaptive_min_samples = 4
 
     # World & Background Lighting
     world = bpy.data.worlds.new("StudioWorld")
@@ -121,10 +176,38 @@ try:
 
     # Helper for importing OBJ with upright +Z axis
     def import_obj_file(filepath):
-        if hasattr(bpy.ops.wm, "obj_import"):
+        if bpy.app.version >= (3, 2, 0):
             bpy.ops.wm.obj_import(filepath=filepath, forward_axis="Y", up_axis="Z")
         else:
             bpy.ops.import_scene.obj(filepath=filepath, axis_forward="Y", axis_up="Z")
+
+    # Helper for creating meshes directly from NumPy arrays via foreach_set
+    def create_mesh_from_numpy(name, verts, faces, mat=None):
+        n_verts = len(verts)
+        n_faces = len(faces)
+        if n_verts == 0 or n_faces == 0:
+            return None
+
+        mesh = bpy.data.meshes.new(name)
+        mesh.vertices.add(n_verts)
+        mesh.vertices.foreach_set("co", verts.ravel())
+
+        mesh.loops.add(n_faces * 3)
+        mesh.loops.foreach_set("vertex_index", faces.ravel())
+
+        mesh.polygons.add(n_faces)
+        loop_starts = np.arange(0, n_faces * 3, 3, dtype=np.int32)
+        loop_totals = np.full(n_faces, 3, dtype=np.int32)
+        mesh.polygons.foreach_set("loop_start", loop_starts)
+        mesh.polygons.foreach_set("loop_total", loop_totals)
+        mesh.polygons.foreach_set("use_smooth", np.ones(n_faces, dtype=bool))
+
+        mesh.update(calc_edges=True)
+        obj = bpy.data.objects.new(name, mesh)
+        if mat:
+            obj.data.materials.append(mat)
+        bpy.context.collection.objects.link(obj)
+        return obj
 
     # 3. Material Generators
     def get_or_create_material(item):
@@ -253,16 +336,24 @@ try:
             for w_item in frame_info.get("water_items", []):
                 w_path = w_item["file"]
                 if os.path.exists(w_path):
-                    bpy.ops.object.select_all(action="DESELECT")
-                    import_obj_file(w_path)
                     w_mat = get_or_create_material(w_item)
-                    for w_obj in bpy.context.selected_objects:
-                        if hasattr(w_obj.data, "polygons"):
-                            for poly in w_obj.data.polygons:
-                                poly.use_smooth = True
-                        w_obj.data.materials.clear()
-                        w_obj.data.materials.append(w_mat)
-                        current_water_objs.append(w_obj)
+                    if w_path.endswith(".npz"):
+                        npz_data = np.load(w_path)
+                        w_verts = npz_data["verts"]
+                        w_faces = npz_data["faces"]
+                        w_obj = create_mesh_from_numpy("WaterMesh", w_verts, w_faces, mat=w_mat)
+                        if w_obj:
+                            current_water_objs.append(w_obj)
+                    else:
+                        bpy.ops.object.select_all(action="DESELECT")
+                        import_obj_file(w_path)
+                        for w_obj in bpy.context.selected_objects:
+                            if hasattr(w_obj.data, "polygons"):
+                                for poly in w_obj.data.polygons:
+                                    poly.use_smooth = True
+                            w_obj.data.materials.clear()
+                            w_obj.data.materials.append(w_mat)
+                            current_water_objs.append(w_obj)
 
             # Apply rigid transforms if present
             for link_name, (pos, orn) in frame_info.get("transforms", {}).items():

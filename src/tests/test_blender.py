@@ -221,3 +221,33 @@ class TestBlenderRenderer:
         assert utr is not None
         assert utr.transmission == 0.88
         assert utr.ior == 1.51
+
+    def test_export_simulation_sequence_npz_files(self, tmp_path):
+        """Verify _export_simulation_sequence_to_dir exports water frame meshes as binary NPZ archives."""
+        room = Room()
+        from build123d import Box
+
+        room.add("casing", Box(10, 10, 10), color=(0.8, 0.8, 0.8, 1.0))
+        scene_data_file = tmp_path / "scene_data.json"
+        cfg = RenderConfig()
+
+        dummy_verts = np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [0.0, 0.01, 0.0]], dtype=np.float32)
+        dummy_faces = np.array([[0, 1, 2]], dtype=np.uint32)
+        water_meshes = [{"pool": (dummy_verts, dummy_faces)}]
+
+        BlenderRenderer._export_simulation_sequence_to_dir(
+            room=room,
+            target_dir=str(tmp_path),
+            scene_data_path=str(scene_data_file),
+            config=cfg,
+            sim_steps=1,
+            water_meshes_per_frame=water_meshes,
+        )
+
+        npz_path = tmp_path / "water_frame_00000.npz"
+        assert npz_path.exists()
+        npz_data = np.load(str(npz_path))
+        assert "verts" in npz_data
+        assert "faces" in npz_data
+        np.testing.assert_allclose(npz_data["verts"], dummy_verts)
+        np.testing.assert_array_equal(npz_data["faces"], dummy_faces)
