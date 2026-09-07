@@ -5,6 +5,7 @@ import shutil
 import tempfile
 from unittest.mock import MagicMock, patch
 import math
+import numpy as np
 from typing import cast, Any
 import pybullet as p
 import pytest
@@ -861,3 +862,51 @@ def test_room_log_rerun_show_boundary_voxels(monkeypatch):
         )
         logged_paths = [call[0][0] for call in mock_rr_log.call_args_list]
         assert any("world/boundaries/lid" in p for p in logged_paths)
+
+
+def test_room_log_rerun_show_water_voxels_and_solid_meshes(monkeypatch):
+    """Verify that Room._log_rerun logs solid water meshes and gates voxel particles on SHOW_WATER_VOXELS."""
+    import rerun as rr
+
+    room = Room(is_simulate=True)
+    water_meshes = {
+        "pool_1": (
+            np.array([[0.0, 0.0, 0.041], [0.05, 0.0, 0.041], [0.0, 0.05, 0.078]], dtype=np.float32),
+            np.array([[0, 1, 2]], dtype=np.uint32),
+        )
+    }
+    particles = [[0.0, 0.0, 0.050], [0.01, 0.01, 0.052]]
+
+    # 1. Default: Solid water meshes logged, discrete voxel particles suppressed
+    with patch("rerun.log") as mock_rr_log:
+        monkeypatch.delenv("SHOW_WATER_VOXELS", raising=False)
+        room._log_rerun(
+            transforms={},
+            particle_positions=particles,
+            particle_colors=None,
+            particle_radii=None,
+            water_meshes=water_meshes,
+            step_idx=0,
+        )
+        logged_calls = {call[0][0]: call[0][1] for call in mock_rr_log.call_args_list}
+        assert "world/water/pool_1" in logged_calls
+        mesh_arg = logged_calls["world/water/pool_1"]
+        assert isinstance(mesh_arg, rr.Mesh3D)
+        assert mesh_arg.albedo_factor is not None
+        assert "world/particles" not in logged_calls
+
+    # 2. SHOW_WATER_VOXELS=1: Both solid meshes and discrete particles logged
+    with patch("rerun.log") as mock_rr_log:
+        monkeypatch.setenv("SHOW_WATER_VOXELS", "1")
+        room._log_rerun(
+            transforms={},
+            particle_positions=particles,
+            particle_colors=None,
+            particle_radii=None,
+            boundary_voxels=None,
+            water_meshes=water_meshes,
+            step_idx=0,
+        )
+        logged_calls = {call[0][0]: call[0][1] for call in mock_rr_log.call_args_list}
+        assert "world/water/pool_1" in logged_calls
+        assert "world/particles" in logged_calls
