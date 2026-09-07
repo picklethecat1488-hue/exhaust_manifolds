@@ -1713,6 +1713,12 @@ def _compute_particle_forces_subroutine(
         up_vector = local_to_world_vector(jnp.array([0.0, 0.0, 1.0]), tube_orn)
         up_world = up_vector[None, :] * pump_lift_scalar[:, None]
 
+        # Viscous pipe wall shear: straightens flow axially along the tube bore, eliminating helical impeller swirl
+        v_tube_xy_local = jnp.stack([v_tube[:, 0], v_tube[:, 1], jnp.zeros_like(v_tube[:, 2])], axis=-1)
+        tube_shear_accel_local = -v_tube_xy_local * 40.0
+        tube_shear_accel_world = local_to_world_vector(tube_shear_accel_local, tube_orn)
+        tube_bore_accel = up_world + tube_shear_accel_world
+
         # Radial spreading and outward deflection at the fountain spout opening (above tube exit)
         r_outer = b_params[i, BoundaryParam.R_OUTER]
         at_spout = (pos_tube[:, 2] > tube_h) & (pos_tube[:, 2] <= tube_h + 0.020) & (r_tube_xy <= r_outer + 0.020)
@@ -1729,12 +1735,22 @@ def _compute_particle_forces_subroutine(
         dome_disp = radial_unit_world * 0.85 + down_dir_world[None, :] * 0.45
         disp_mag = jnp.sqrt(jnp.sum(dome_disp**2, axis=-1, keepdims=True) + 1e-8)
         spout_out_dir = dome_disp / disp_mag
-        spout_accel = spout_out_dir * (g_mag * 2.0 + v_flow_est * 2.0)
+
+        # Straighten any residual azimuthal/tangential velocity at spout
+        v_tube_tangential_local = jnp.stack(
+            [-pos_tube[:, 1] / r_xy_safe, pos_tube[:, 0] / r_xy_safe, jnp.zeros_like(pos_tube[:, 0])],
+            axis=-1,
+        )
+        v_tangential_mag = jnp.sum(v_tube * v_tube_tangential_local, axis=-1, keepdims=True)
+        spout_tangential_damp_world = (
+            -local_to_world_vector(v_tube_tangential_local * v_tangential_mag, tube_orn) * 25.0
+        )
+        spout_accel = spout_out_dir * (g_mag * 2.0 + v_flow_est * 2.0) + spout_tangential_damp_world
 
         tube_pump_accel_i = jnp.where(
             at_spout[:, None],
             spout_accel,
-            jnp.where(in_tube[:, None], up_world, 0.0),
+            jnp.where(in_tube[:, None], tube_bore_accel, 0.0),
         )
 
         is_tube = shape == SHAPE_TUBE
@@ -2191,8 +2207,8 @@ def _ccd_tube_cylinder_boundary(
     v_x_outer = v_rel_local[:, 0] - v_rad_inward * (pos_next_loc[:, 0] / r_safe)
     v_y_outer = v_rel_local[:, 1] - v_rad_inward * (pos_next_loc[:, 1] / r_safe)
 
-    v_x_inner = v_rel_local[:, 0] - v_rad_outward * (pos_next_loc[:, 0] / r_safe)
-    v_y_inner = v_rel_local[:, 1] - v_rad_outward * (pos_next_loc[:, 1] / r_safe)
+    v_x_inner = (v_rel_local[:, 0] - v_rad_outward * (pos_next_loc[:, 0] / r_safe)) * 0.80
+    v_y_inner = (v_rel_local[:, 1] - v_rad_outward * (pos_next_loc[:, 1] / r_safe)) * 0.80
 
     v_x = jnp.where(penetrating_outer, v_x_outer, jnp.where(penetrating_inner, v_x_inner, v_rel_local[:, 0]))
     v_y = jnp.where(penetrating_outer, v_y_outer, jnp.where(penetrating_inner, v_y_inner, v_rel_local[:, 1]))

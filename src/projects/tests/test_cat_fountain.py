@@ -1455,3 +1455,90 @@ class TestCatFountainProvider:
         # South bridge/cradle wall (Y = tube_y - tube_r - 1.0) must be solid to support and locate the cover
         south_y = tube_y - tube_r - 1.0
         assert solid.is_inside((0.0, south_y, z_mid)), f"Pump cover South cradle wall is broken at Y = {south_y}!"
+
+    def test_tube_discharge_axial_flow_no_swirl(self, provider):
+        """Verify that water emerging from the delivery tube onto the lid platform flows axially and radially without tangential swirl."""
+        import jax.numpy as jnp
+        import numpy as np
+        from model import BoundaryConfig, BoundaryType, ShapeType
+        from provider.bullet import LinkType
+        from provider.fluid import PhysicsConfig, _physics_step_jax
+
+        tube_y = 0.028
+        tube_r = provider.settings.tube_radius * 0.001
+        tube_h = provider.settings.tube_height * 0.001
+        base_h = provider.settings.floor_z * 0.001
+
+        base_cfg = BoundaryConfig(
+            shape=ShapeType.CYLINDER,
+            type=BoundaryType.CAVITY,
+            link_type=LinkType.BASE,
+            radius=0.1,
+            height=0.05,
+            link_idx=-1,
+        )
+        tube_cfg = BoundaryConfig(
+            shape=ShapeType.TUBE,
+            type=BoundaryType.SOLID,
+            link_type=LinkType.TUBE,
+            radius=tube_r,
+            height=tube_h,
+            thickness=provider.settings.tube_thickness * 0.001,
+            spout_radius=provider.settings.spout_deflection_radius * 0.001,
+            spout_height=provider.settings.spout_deflection_thickness * 0.001,
+            xyz=(0.0, tube_y, base_h),
+            link_idx=1,
+        )
+
+        config = PhysicsConfig(
+            mass=1e-4,
+            dt_sub=1.0 / 240.0,
+            n_substeps=4,
+            boundary_configs=(base_cfg, tube_cfg),
+            gravity=(0.0, 0.0, -9.81),
+            base_idx=0,
+            K_boundary=1000.0,
+            D_boundary=5.0,
+            r_s=0.0015,
+            high_damping_value=0.998,
+            nx=32,
+            ny=32,
+            nz=28,
+            dx=0.005,
+            origin=(-0.075, -0.075, 0.0),
+        )
+
+        # Place a particle inside the tube bore with large tangential swirl velocity (v_x = 0.5 m/s, v_y = 0.0 m/s)
+        pos = jnp.array([[0.0, tube_y + tube_r * 0.5, base_h + tube_h * 0.5]], dtype=jnp.float32)
+        vel = jnp.array([[0.5, 0.0, 0.8]], dtype=jnp.float32)
+        f_lbm = jnp.zeros((15, 32, 32, 28), dtype=jnp.float32)
+        b_pos = jnp.array([[0.0, 0.0, 0.0], [0.0, tube_y, base_h]], dtype=jnp.float32)
+        b_orn = jnp.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]], dtype=jnp.float32)
+
+        # Step physics forward
+        pos_curr, vel_curr = pos, vel
+        for step in range(5):
+            pos_curr, vel_curr, f_lbm, _, _ = _physics_step_jax(
+                pos_curr,
+                vel_curr,
+                f_lbm,
+                b_pos,
+                b_orn,
+                jnp.zeros(3, dtype=jnp.float32),
+                120.0,
+                step * (4.0 / 240.0),
+                0.995,
+                config=config,
+            )
+
+        vel_np = np.asarray(vel_curr)
+        pos_np = np.asarray(pos_curr)
+        # Compute tangential velocity v_theta = (-v_x * dy + v_y * dx) / r relative to tube center
+        dx = pos_np[0, 0]
+        dy = pos_np[0, 1] - tube_y
+        r_xy = max(np.sqrt(dx**2 + dy**2), 1e-6)
+        v_theta = (-vel_np[0, 0] * dy + vel_np[0, 1] * dx) / r_xy
+        # Tangential swirl should be damped to near zero (< 0.10 m/s)
+        assert abs(v_theta) < 0.10, (
+            f"Expected tangential swirl in tube bore to be damped, got v_theta = {v_theta:.3f} m/s"
+        )
