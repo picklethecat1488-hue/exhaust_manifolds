@@ -802,6 +802,155 @@ def test_fluid_cad_context_from_boundaries_and_urdf_metadata():
     assert np.isclose(center_drain.arc_radius, 0.030)
 
 
+def test_three_drain_waterfalls_continuous_mesh_generation():
+    """Verify that all 3 waterfalls (Center, Left, Right) activate simultaneously and produce watertight meshes."""
+    import trimesh
+    from model.boundary_config import BoundaryConfig, ShapeType, BoundaryType, LinkType
+
+    ctx = FluidCADContext.from_boundaries(
+        [
+            BoundaryConfig(
+                link_idx=0,
+                link_type=LinkType.BASE,
+                shape=ShapeType.CYLINDER,
+                type=BoundaryType.CAVITY,
+                xyz=(0.0, 0.0, 0.041),
+                radius=0.090,
+                height=0.060,
+            ),
+            BoundaryConfig(
+                link_idx=1,
+                link_type=LinkType.TUBE,
+                shape=ShapeType.TUBE,
+                type=BoundaryType.SOLID,
+                xyz=(0.0, 0.028, 0.041),
+                radius=0.010,
+                has_tube=True,
+                tube_pos=(0.0, 0.028, 0.041),
+                tube_radius=0.008,
+            ),
+            BoundaryConfig(
+                link_idx=2,
+                link_type=LinkType.LID,
+                shape=ShapeType.CYLINDER,
+                type=BoundaryType.CAVITY,
+                xyz=(0.0, 0.0, 0.098),
+                radius=0.080,
+                height=0.015,
+                has_intake=True,
+                intake_pos=(0.0, 0.028, 0.010),
+                intake_radius=0.030,
+                has_drain=True,
+                drain_pos=(0.0, -0.020, 0.0),
+                drain_radius=0.055,
+            ),
+        ]
+    )
+
+    # Active flow particles across all 3 spaced-apart spillways:
+    # 1. Drain_Center: (x=0.0, y=-0.002) at lip and (x=0.0, y=-0.015) in falling chute
+    # 2. Drain_Left: (x=-0.024, y=0.010) at lip and (x=-0.025, y=-0.010) in falling chute
+    # 3. Drain_Right: (x=0.024, y=0.010) at lip and (x=0.025, y=-0.010) in falling chute
+    # 4. Reservoir pool particles
+    pos = np.array(
+        [
+            # Center spillway (upstream feeding + falling column)
+            [0.0, 0.005, 0.106],
+            [0.0, -0.002, 0.105],
+            [0.0, -0.012, 0.085],
+            [0.0, -0.018, 0.065],
+            # Left spillway (upstream feeding + falling column)
+            [-0.022, 0.018, 0.106],
+            [-0.024, 0.010, 0.105],
+            [-0.025, -0.005, 0.085],
+            [-0.026, -0.015, 0.065],
+            # Right spillway (upstream feeding + falling column)
+            [0.022, 0.018, 0.106],
+            [0.024, 0.010, 0.105],
+            [0.025, -0.005, 0.085],
+            [0.026, -0.015, 0.065],
+            # Pool resting particles
+            [0.0, 0.0, 0.045],
+            [0.03, 0.03, 0.045],
+            [-0.03, -0.03, 0.045],
+        ],
+        dtype=np.float32,
+    )
+    vel = np.zeros_like(pos)
+    # Downward velocity on falling particles
+    vel[[2, 3, 6, 7, 10, 11], 2] = -0.15
+
+    tracker = FluidBodyTracker(r_s=0.0025)
+    bodies = tracker.update_bodies(pos, vel, cad_context=ctx)
+
+    waterfall_bodies = [b for b in bodies if b.stage == FluidStage.DRAIN_WATERFALL]
+    assert len(waterfall_bodies) == 3, f"Expected 3 drain waterfalls, got {len(waterfall_bodies)}"
+
+    names = {b.display_name for b in waterfall_bodies}
+    assert "drain_waterfall_drain_center" in names
+    assert "drain_waterfall_drain_left" in names
+    assert "drain_waterfall_drain_right" in names
+
+    # Verify that each waterfall mesh is 100% watertight, non-empty, and connects from lid to pool
+    for wf in waterfall_bodies:
+        verts, faces = wf.to_mesh()
+        assert len(verts) > 0
+        assert len(faces) > 0
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        assert mesh.is_watertight
+        assert mesh.volume > 0.0
+        assert mesh.euler_number == 2
+        assert np.max(verts[:, 2]) >= 0.104
+        assert np.min(verts[:, 2]) <= 0.065
+
+
+def test_heightfield_cylinder_mesh_vortex_preservation_over_noise():
+    """Verify that pool heightfield preserves smooth vortex depression without false spikes or random noise."""
+    import trimesh
+    from model.fluid_body import generate_heightfield_cylinder_mesh
+
+    radius = 0.080
+    z_floor = 0.041
+    default_z_top = 0.078
+    r0 = 0.030
+    delta = 0.018
+
+    # 3,000 simulated particles in a bowl with a vortex depression in the center
+    np.random.seed(123)
+    r_p = np.sqrt(np.random.uniform(0, radius**2, 3000))
+    th_p = np.random.uniform(0, 2 * np.pi, 3000)
+    x_p = r_p * np.cos(th_p)
+    y_p = r_p * np.sin(th_p)
+    z_surf_true = default_z_top - delta * np.exp(-((r_p / r0) ** 2))
+    z_p = np.random.uniform(z_floor, z_surf_true)
+    surf_pos = np.stack([x_p, y_p, z_p], axis=-1)
+
+    verts, faces = generate_heightfield_cylinder_mesh(
+        radius=radius,
+        z_floor=z_floor,
+        surface_positions=surf_pos,
+        default_z_top=default_z_top,
+        center=(0.0, 0.0),
+        n_rings=8,
+        n_spokes=32,
+    )
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+    assert mesh.is_watertight
+    assert mesh.volume > 0.0
+    assert mesh.euler_number == 2
+
+    # Verify vortex profile: Center vertex (vertex 0) should be depressed relative to outer rim vertices
+    z_center = verts[0, 2]
+    # Outer ring vertices are the last ring before bottom cap
+    outer_ring_verts = verts[1 + 7 * 32 : 1 + 8 * 32, 2]
+    z_outer_mean = float(np.mean(outer_ring_verts))
+    vortex_depth = z_outer_mean - z_center
+
+    # Vortex depth must be distinct (> 6mm) and center should not spike up to default_z_top
+    assert vortex_depth >= 0.006, f"Expected vortex depth >= 6mm, got {vortex_depth * 1000:.2f}mm"
+    assert z_center < default_z_top - 0.010, f"Expected center depressed below {default_z_top - 0.010}, got {z_center}"
+
+
 def test_arc_waterfall_mesh_watertightness_and_cad_solid():
     """Verify that curved arc waterfall generates a 100% watertight manifold mesh and valid build123d CAD solid."""
     import trimesh
@@ -957,3 +1106,70 @@ def test_splash_cluster_splitting_and_pool_smoothing():
     p_mesh = trimesh.Trimesh(vertices=p_verts, faces=p_faces)
     assert p_mesh.is_watertight
     assert p_mesh.volume > 0.0
+
+
+def test_splash_cluster_vertical_span_and_pool_depth_stability():
+    """Test that splash clusters never chain vertically and reservoir pool depth remains stable."""
+    import trimesh
+
+    r_s = 0.0025
+    z_floor = 0.041
+    z_lid = 0.098
+    bowl_r = 0.090
+
+    # 1. Test vertically aligned airborne droplets spanning 30mm
+    vert_droplets = np.array(
+        [
+            [0.050, 0.0, 0.060],
+            [0.050, 0.0, 0.065],
+            [0.050, 0.0, 0.070],
+            [0.050, 0.0, 0.075],
+            [0.050, 0.0, 0.080],
+            [0.050, 0.0, 0.085],
+        ],
+        dtype=np.float32,
+    )
+    # Plus resting pool particles
+    pool_pts = np.array(
+        [
+            [0.0, -0.050, 0.045],
+            [0.010, -0.050, 0.045],
+            [-0.010, -0.050, 0.045],
+        ],
+        dtype=np.float32,
+    )
+    all_positions = np.vstack([pool_pts, vert_droplets])
+    velocities = np.zeros_like(all_positions)
+
+    cad_context = FluidCADContext(
+        features=(
+            CADFeature("Tube", x=0.0, y=0.028, z=0.041, r=0.010),
+            CADFeature("Terrace", x=0.0, y=0.028, z=0.108, r=0.030),
+            CADFeature("Drain", x=0.0, y=-0.020, z=0.098, r=0.0154),
+            CADFeature("Pocket", x=0.0, y=0.0, z=0.098, r=0.080),
+            CADFeature("Bowl", x=0.0, y=0.0, z=0.041, r=bowl_r),
+        )
+    )
+
+    tracker = FluidBodyTracker(r_s=r_s)
+    bodies = tracker.update_bodies(all_positions, velocities, cad_context=cad_context)
+
+    # Pool must contain the 3 resting particles
+    pool_bodies = [b for b in bodies if b.stage == FluidStage.BOWL_POOL]
+    assert len(pool_bodies) == 1
+    assert pool_bodies[0].particle_count >= 3
+
+    # Splash clusters must be split into multiple compact clusters rather than one tall 30mm chain
+    splash_clusters = [b for b in bodies if b.stage == FluidStage.SPLASH_CLUSTER]
+    assert len(splash_clusters) >= 2
+
+    # Verify each splash cluster is compact (< 12mm height) and watertight
+    for sc in splash_clusters:
+        verts, faces = sc.to_mesh()
+        assert len(verts) > 0
+        assert len(faces) > 0
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        assert mesh.is_watertight
+        assert mesh.volume > 0.0
+        h = np.max(verts[:, 2]) - np.min(verts[:, 2])
+        assert h <= 0.012, f"Splash cluster height {h * 1000:.1f}mm exceeded 12mm maximum threshold"

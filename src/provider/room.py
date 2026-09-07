@@ -62,6 +62,7 @@ from .utils import get_rgba_color
 
 if TYPE_CHECKING:
     from model.app_config import AppConfig
+    from model.material import MaterialsModel
 
 
 from .bullet import BulletStateTracker, _is_real_physics_client
@@ -74,11 +75,17 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
     Keys are unique names for the items, and values are tuples of (geometry, rgba_tuple).
     """
 
-    def __init__(self, config: Optional["AppConfig"] = None, is_simulate: bool = False):
-        """Initialize the room with an optional application configuration."""
+    def __init__(
+        self,
+        config: Optional["AppConfig"] = None,
+        is_simulate: bool = False,
+        materials: Optional["MaterialsModel"] = None,
+    ):
+        """Initialize the room with optional application configuration and materials model."""
         super().__init__()
         self.config = config
         self.is_simulate = is_simulate
+        self.materials = materials
         self._labels: list[tuple[str, str, Any, TextArgs]] = []
         self.gravity: tuple[float, float, float] = (0.0, 0.0, -9.81)
         self.line_weights: dict[str, float] = {}
@@ -1009,6 +1016,11 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
         logger: Any,
         build_dir: str = "build",
         save_rrd: Optional[str] = None,
+        save_mp4: Optional[str] = None,
+        view_from: str = "iso",
+        fps: int = 60,
+        resolution: tuple[int, int] = (2560, 1440),
+        samples: int = 32,
         rerun_port: Optional[int] = None,
         spawn_viewer: bool = True,
         stage_window_size: Optional[int] = None,
@@ -1027,17 +1039,22 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
         Provider.validate_simulate_hooks(provider_hooks)
 
         bullet_sim = Bullet(
-            self,
-            provider_hooks,
-            proj_name,
-            sim_target,
-            steps,
-            manager,
-            logger,
-            build_dir,
-            save_rrd,
-            rerun_port,
-            spawn_viewer,
+            room=self,
+            provider_hooks=provider_hooks,
+            proj_name=proj_name,
+            sim_target=sim_target,
+            steps=steps,
+            manager=manager,
+            logger=logger,
+            build_dir=build_dir,
+            save_rrd=save_rrd,
+            save_mp4=save_mp4,
+            view_from=view_from,
+            fps=fps,
+            resolution=resolution,
+            samples=samples,
+            rerun_port=rerun_port,
+            spawn_viewer=spawn_viewer,
             stage_window_size=stage_window_size,
         )
         bullet_sim.run()

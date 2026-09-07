@@ -58,6 +58,7 @@ pytest
 * **Configuration Persistence**: For configuration actions, they should persist saved settings to the Pydantic environment file (`.env`) in addition to updating any source project data files (like `measurements.yaml`). This ensures they are immediately active in the build environment.
 * **No Fallback Constants**: Do NOT place fallback constants directly in the codebase when parsing configs, settings, or CAD feature coordinates (e.g., using ternary fallbacks like `ctx.tube.y if ctx else 0.028` or `getattr` defaults like `0.004` or `0.90`). All configuration fields and CAD coordinates must be strongly typed and resolved dynamically via configuration models, metadata definitions, CAD context features, or joint state queries rather than having hardcoded fallback/default values defined in python source code. Fallback constants of `0`, `0.0`, `(0.0, 0.0)`, or `None` are strictly required to represent unconfigured properties or missing coordinates. This ensures configuration changes propagate cleanly and prevents silent regressions.
 * **No Dead Code**: Unused code (such as dangling clauses, functions, or parameters that do nothing) and settings that do not affect or update anything must be removed from the repository. Maintain a clean, minimalist codebase to prevent confusion and bugs.
+* **Parameter & Signature Hygiene**: Whenever modifying, refactoring, or simplifying functions, subroutines, or methods, any parameters that become unused (such as legacy flags, signs like `normal_sign: float`, unused tolerances, or obsolete scalars) MUST be immediately pruned from both the function signature and all caller invocations with each change. Do NOT leave unused parameters in signatures, accept dummy parameters, or pass dead constant arguments.
 
 ### 4. Physical Simulation & URDF Metadata
 * For components participating in physics simulations (e.g., PyBullet, JAX fluids), attach URDF and simulation attributes to shape geometries.
@@ -98,6 +99,11 @@ pytest
 
 ### 8. Work Tracking & Task Management
 * **Task List (`TODO.md`)**: Maintain and track planned tasks, active implementation steps, outstanding engineering checklist items, and completed work in a `TODO.md` file in the workspace root. Keep the checklist updated (`[ ]` -> `[x]`) as subtasks progress to provide clear visibility and alignment.
+
+### 9. Code Generation & Jinja2 Templates
+* **Jinja2 Templating Engine**: Always use Jinja2 (`jinja2`) to generate templated Python scripts, Blender headless scripts, URDF models, or simulation configurations rather than embedding large multi-line f-strings directly inside Python source files.
+* **Dedicated Templates Directory**: All templated script files (`.py.j2`, `.yaml.j2`, `.urdf.j2`, `.sh.j2`) MUST be stored in a dedicated `templates/` folder nested within the respective package or module (e.g., `src/provider/templates/`).
+* **Clean Rendering & Context Separation**: Render external Jinja2 templates via `jinja2.Environment(loader=jinja2.FileSystemLoader(...), trim_blocks=True, lstrip_blocks=True)` or package loaders, passing configuration parameters as explicit dictionaries or strongly typed models.
 
 ---
 

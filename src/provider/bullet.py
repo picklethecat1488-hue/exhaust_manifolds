@@ -140,6 +140,11 @@ class Bullet:
         logger: Any,
         build_dir: str = "build",
         save_rrd: Optional[str] = None,
+        save_mp4: Optional[str] = None,
+        view_from: str = "iso",
+        fps: int = 60,
+        resolution: tuple[int, int] = (2560, 1440),
+        samples: int = 32,
         rerun_port: Optional[int] = None,
         spawn_viewer: bool = True,
         stage_window_size: Optional[int] = None,
@@ -154,6 +159,11 @@ class Bullet:
         self.logger = logger
         self.build_dir = build_dir
         self.save_rrd = save_rrd
+        self.save_mp4 = save_mp4
+        self.view_from = view_from
+        self.fps = fps
+        self.resolution = resolution
+        self.samples = samples
         self.rerun_port = rerun_port
         self.spawn_viewer = spawn_viewer
         self.stage_window_size = stage_window_size
@@ -546,9 +556,12 @@ class Bullet:
 
                 log_queue = None
                 log_thread = None
-                is_logging_enabled = self.spawn_viewer or (self.save_rrd is not None)
+                is_logging_enabled = self.spawn_viewer or (self.save_rrd is not None) or (self.save_mp4 is not None)
+                frame_fluid_bodies: list[list[Any]] = []
+                frame_water_meshes: list[dict[str, tuple[np.ndarray, np.ndarray]]] = []
+                frame_transforms: list[dict[str, tuple[list[float], list[float]]]] = []
 
-                if is_logging_enabled:
+                if self.spawn_viewer or self.save_rrd is not None:
                     q = queue.Queue(maxsize=128)
                     log_queue = q
 
@@ -593,11 +606,17 @@ class Bullet:
 
                     if is_logging_enabled:
                         state_tracker.update_state()
+                        if self.save_mp4:
+                            if state_tracker.fluid_bodies is not None:
+                                frame_fluid_bodies.append(list(state_tracker.fluid_bodies))
+                            elif state_tracker.water_meshes is not None:
+                                frame_water_meshes.append(dict(state_tracker.water_meshes))
+                            frame_transforms.append(dict(state_tracker.transforms))
 
                     if not terminated:
                         p.stepSimulation(physicsClientId=physics_client)
 
-                    if is_logging_enabled and log_queue is not None:
+                    if log_queue is not None:
                         try:
                             log_queue.put_nowait(
                                 (
@@ -635,9 +654,33 @@ class Bullet:
                     if terminated:
                         break
 
-                if is_logging_enabled and log_queue is not None and log_thread is not None:
+                if log_queue is not None and log_thread is not None:
                     log_queue.put(None)
                     log_thread.join()
+
+                if self.save_mp4 and frame_transforms:
+                    self.logger.print(
+                        f"Rendering {len(frame_transforms)} frames to MP4 via Blender: {self.save_mp4}", symbol="🎬"
+                    )
+                    from .blender import BlenderRenderer, RenderConfig
+
+                    render_cfg = RenderConfig(
+                        resolution=self.resolution,
+                        fps=self.fps,
+                        samples=self.samples,
+                        view_from=self.view_from,
+                        output_mp4=self.save_mp4,
+                    )
+                    BlenderRenderer.render_simulation_to_mp4(
+                        room=self.room,
+                        output_mp4=self.save_mp4,
+                        sim_steps=len(frame_transforms),
+                        config=render_cfg,
+                        fluid_bodies_per_frame=frame_fluid_bodies if frame_fluid_bodies else None,
+                        water_meshes_per_frame=frame_water_meshes if frame_water_meshes else None,
+                        rigid_transforms_per_frame=frame_transforms,
+                    )
+                    self.logger.print(f"Exported H.264 MP4 video to {self.save_mp4}", symbol="✨")
 
             except KeyboardInterrupt:
                 self.logger.print("Simulation stopped.", symbol="💥")

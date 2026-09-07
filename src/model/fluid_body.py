@@ -113,8 +113,8 @@ def generate_heightfield_cylinder_mesh(
     surface_positions: Optional[np.ndarray] = None,
     default_z_top: float = 0.078,
     center: tuple[float, float] = (0.0, 0.0),
-    n_rings: int = 6,
-    n_spokes: int = 32,
+    n_rings: int = 24,
+    n_spokes: int = 64,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate a watertight 3D cylinder triangle mesh with a dynamic top surface heightfield."""
     cx, cy = center
@@ -123,14 +123,12 @@ def generate_heightfield_cylinder_mesh(
     sin_s = np.sin(spoke_angles)
 
     # 1. Build 2D surface height grid from surface particles strictly within containing radius
-    nx, ny = 32, 32
+    nx, ny = 48, 48
     x_min, x_max = cx - radius, cx + radius
     y_min, y_max = cy - radius, cy + radius
     dx = max(1e-4, (x_max - x_min) / nx)
     dy = max(1e-4, (y_max - y_min) / ny)
     grid_z = np.full((nx, ny), default_z_top, dtype=np.float32)
-    grid_count = np.zeros((nx, ny), dtype=np.float32)
-    grid_sum_z = np.zeros((nx, ny), dtype=np.float32)
 
     if surface_positions is not None and len(surface_positions) > 0:
         d_center_sq = (surface_positions[:, 0] - cx) ** 2 + (surface_positions[:, 1] - cy) ** 2
@@ -143,19 +141,40 @@ def generate_heightfield_cylinder_mesh(
         if len(valid_pos) > 0:
             ix = np.clip(np.floor((valid_pos[:, 0] - x_min) / dx).astype(int), 0, nx - 1)
             iy = np.clip(np.floor((valid_pos[:, 1] - y_min) / dy).astype(int), 0, ny - 1)
-            np.add.at(grid_count, (ix, iy), 1.0)
-            np.add.at(grid_sum_z, (ix, iy), valid_pos[:, 2])
 
-            has_samples = grid_count > 0.0
-            grid_z = np.where(has_samples, grid_sum_z / np.maximum(1.0, grid_count), default_z_top)
+            grid_col_max = np.full((nx, ny), -1.0, dtype=np.float32)
+            np.maximum.at(grid_col_max, (ix, iy), valid_pos[:, 2])
+            has_samples = grid_col_max > 0.0
 
-            # Vectorized 2D 3x3 smoothing pass across grid_z for organic, ripple-smoothed pool surface
-            pad = np.pad(grid_z, 1, mode="edge")
-            grid_z = (
-                0.50 * pad[1:-1, 1:-1]
-                + 0.09 * (pad[:-2, 1:-1] + pad[2:, 1:-1] + pad[1:-1, :-2] + pad[1:-1, 2:])
-                + 0.035 * (pad[:-2, :-2] + pad[:-2, 2:] + pad[2:, :-2] + pad[2:, 2:])
-            )
+            # Grid coordinates for radial profile inpainting
+            gx_coords = x_min + (np.arange(nx) + 0.5) * dx - cx
+            gy_coords = y_min + (np.arange(ny) + 0.5) * dy - cy
+            gx_grid, gy_grid = np.meshgrid(gx_coords, gy_coords, indexing="ij")
+            r_grid = np.sqrt(gx_grid**2 + gy_grid**2)
+
+            # 1. Radial profile inpainting for empty/unvisited cells (prevents false spike noise in vortex eye)
+            n_rbins = 16
+            r_bins = np.linspace(0, radius, n_rbins + 1)
+            r_bin_idx = np.clip(np.digitize(r_grid[has_samples], r_bins) - 1, 0, n_rbins - 1)
+            r_prof = np.zeros(n_rbins, dtype=np.float32)
+            r_prof_count = np.zeros(n_rbins, dtype=np.float32)
+            np.add.at(r_prof, r_bin_idx, grid_col_max[has_samples])
+            np.add.at(r_prof_count, r_bin_idx, 1.0)
+            r_prof = np.where(r_prof_count > 0, r_prof / np.maximum(1.0, r_prof_count), default_z_top)
+
+            r_grid_bin = np.clip(np.digitize(r_grid, r_bins) - 1, 0, n_rbins - 1)
+            radial_base = r_prof[r_grid_bin]
+            grid_filled = np.where(has_samples, grid_col_max, radial_base)
+
+            # 2. Multi-pass Gaussian smoothing across grid_z for organic, noise-free pool surface
+            grid_z = grid_filled.copy()
+            for _ in range(4):
+                pad = np.pad(grid_z, 1, mode="edge")
+                grid_z = (
+                    0.36 * pad[1:-1, 1:-1]
+                    + 0.11 * (pad[:-2, 1:-1] + pad[2:, 1:-1] + pad[1:-1, :-2] + pad[1:-1, 2:])
+                    + 0.05 * (pad[:-2, :-2] + pad[:-2, 2:] + pad[2:, :-2] + pad[2:, 2:])
+                )
 
     def sample_z(x_arr: np.ndarray, y_arr: np.ndarray) -> np.ndarray:
         gx = (x_arr - x_min) / dx - 0.5
@@ -317,8 +336,9 @@ def generate_manifold_mesh_around_particles(
             ]
         )
         hull = ConvexHull(pts_expanded)
-        # Volume inflation guardrail: prevent sparse points from producing huge hollow volumes
-        if hull.volume > 3.5 * vol:
+        z_span = float(np.max(positions[:, 2]) - np.min(positions[:, 2]))
+        # Volume inflation & vertical span guardrail: prevent sparse droplets from producing huge hollow/tall volumes
+        if hull.volume > 2.5 * vol or z_span > max(0.010, r_s * 4.0):
             centroid = tuple(float(x) for x in np.mean(positions, axis=0))
             return generate_sphere_mesh(center=centroid, radius=equiv_radius)
 
@@ -329,7 +349,7 @@ def generate_manifold_mesh_around_particles(
         return vertices, faces
     except Exception:
         centroid = tuple(float(x) for x in np.mean(positions, axis=0))
-        max_extent = min(float(np.max(np.linalg.norm(positions - centroid, axis=1))) + r_s, equiv_radius * 1.5)
+        max_extent = min(float(np.max(np.linalg.norm(positions - centroid, axis=1))) + r_s, equiv_radius * 1.3)
         safe_radius = max(equiv_radius, max_extent)
         return generate_sphere_mesh(center=centroid, radius=safe_radius)
 
@@ -813,23 +833,23 @@ class FluidCADContext(NamedTuple):
 
         if aperture_ratio > 1.5:
             # Multi-spillway configuration attached to the front lip of the drinking shelf / platform
-            # Center spillway: theta around pi (180 deg, pointing South towards -Y directly into cutout opening)
-            th_c_span = 0.70
+            # 1. Center spillway: theta around pi (180 deg, pointing South towards -Y directly into cutout opening)
+            th_c_span = 0.40
             th_c_start = math.pi - th_c_span / 2.0
             th_c_end = math.pi + th_c_span / 2.0
             x_c = plat_cx + plat_r * math.sin(math.pi)
             y_c = plat_cy + plat_r * math.cos(math.pi)
 
-            # Left spillway: theta spanning [pi + 0.35, pi + 0.90] (around 215 deg)
-            th_l_start = math.pi + 0.35
-            th_l_end = math.pi + 0.90
+            # 2. Left spillway: spaced out toward the left wing/spillway (around 234 deg)
+            th_l_start = math.pi + 0.65
+            th_l_end = math.pi + 1.25
             l_angle = (th_l_start + th_l_end) / 2.0
             x_l = plat_cx + plat_r * math.sin(l_angle)
             y_l = plat_cy + plat_r * math.cos(l_angle)
 
-            # Right spillway: theta spanning [pi - 0.90, pi - 0.35] (around 145 deg)
-            th_r_start = math.pi - 0.90
-            th_r_end = math.pi - 0.35
+            # 3. Right spillway: spaced out toward the right wing/spillway (around 126 deg)
+            th_r_start = math.pi - 1.25
+            th_r_end = math.pi - 0.65
             r_angle = (th_r_start + th_r_end) / 2.0
             x_r = plat_cx + plat_r * math.sin(r_angle)
             y_r = plat_cy + plat_r * math.cos(r_angle)
@@ -1104,6 +1124,7 @@ class FluidBody(BaseModel):
     surface_positions: Optional[np.ndarray] = Field(
         default=None, description="Local or surface particle positions (M, 3) for dynamic surface heightfield sampling."
     )
+    urdf_material: str = Field(default="water", description="URDF material name for physics and rendering.")
 
     @property
     def display_name(self) -> str:
@@ -1152,8 +1173,8 @@ class FluidBody(BaseModel):
                         surface_positions=self.surface_positions,
                         default_z_top=z_top_val,
                         center=center,
-                        n_rings=6,
-                        n_spokes=n_segments,
+                        n_rings=24,
+                        n_spokes=max(64, n_segments * 2),
                     )
 
             case FluidBodyType.STREAM:
@@ -1189,13 +1210,19 @@ class FluidBody(BaseModel):
 
                 # Lower Drain Waterfall: Plunges from lid pool cutout down into reservoir bowl pool
                 z_top_val = (ctx.z_lid + 0.003) if ctx is not None and ctx.z_lid > 0.0 else z_max
+                if feat is not None and feat.z > 0.0:
+                    z_top_val = max(z_top_val, feat.z + 0.002)
                 if self.surface_positions is not None and len(self.surface_positions) > 0:
                     max_stream_z = float(np.max(self.surface_positions[:, 2]))
                     z_top_val = max(z_top_val, min(max_stream_z + 0.002, z_max))
 
                 z_bot_val = (ctx.z_floor + 0.015) if ctx is not None and ctx.z_floor > 0.0 else z_min
                 if self.surface_positions is not None and len(self.surface_positions) > 0:
-                    z_bot_val = max(z_bot_val, float(np.min(self.surface_positions[:, 2])) - 0.003)
+                    min_stream_z = float(np.min(self.surface_positions[:, 2]))
+                    z_bot_val = min(z_bot_val, min_stream_z - 0.002)
+
+                if z_top_val <= z_bot_val:
+                    z_top_val = z_bot_val + 0.010
 
                 if feat is not None and getattr(feat, "is_arc", False):
                     return generate_arc_waterfall_mesh(
@@ -1242,8 +1269,8 @@ class FluidBody(BaseModel):
                     surface_positions=self.surface_positions,
                     default_z_top=z_top_val,
                     center=center,
-                    n_rings=6,
-                    n_spokes=n_segments,
+                    n_rings=24,
+                    n_spokes=max(64, n_segments * 2),
                 )
 
             case _:
@@ -1632,7 +1659,7 @@ class FluidBody(BaseModel):
             self.bounds_max = (float(max_b[0]), float(max_b[1]), float(max_b[2]))
 
         if self.body_type == FluidBodyType.POOL and len(body_pos) > 0:
-            z_thresh = np.percentile(body_pos[:, 2], 75.0)
+            z_thresh = np.percentile(body_pos[:, 2], 80.0)
             top_mask = body_pos[:, 2] >= z_thresh
             self.surface_positions = body_pos[top_mask]
         else:
@@ -1817,17 +1844,32 @@ class FluidBodyTracker:
             bed_mask = bed_mask & (d_d_xy > max(0.020, drain.r + self.r_s * 2.0))
 
         bed_indices = np.flatnonzero(bed_mask)
-        z_pool_max_allowed = z_lid - 0.015
+        z_pool_max_allowed = z_lid - 0.008
+
+        # Derive volume-consistent lower bound for reservoir pool surface
+        bowl = ctx.get(CADFeatureType.BOWL)
+        bowl_r = bowl.r if bowl is not None and bowl.r > 0.0 else 0.090
+        basin_area = max(1e-4, math.pi * (bowl_r**2 - tube_r**2))
+        vol_particle = (4.0 / 3.0) * math.pi * (self.r_s**3)
+        n_basin_pts = len(np.flatnonzero(in_basin))
+        h_vol = (n_basin_pts * vol_particle) / basin_area
+        z_vol_surf = z_floor + h_vol
 
         if len(bed_indices) > 0:
             bed_z = pos_act[bed_indices, 2]
-            z_pool_surf = min(float(np.percentile(bed_z, 75.0) + self.r_s), z_pool_max_allowed)
+            resting_mask = bed_z <= z_vol_surf + max(0.008, self.r_s * 3.0)
+            resting_z = bed_z[resting_mask] if np.any(resting_mask) else bed_z
+            p_top_z = float(np.percentile(resting_z, 98.0) + self.r_s * 0.5)
+            z_pool_surf = min(float(max(p_top_z, z_vol_surf + self.r_s * 0.5)), z_pool_max_allowed)
             z_pool_surf = max(z_pool_surf, z_floor + self.r_s)
         else:
             basin_indices = np.flatnonzero(in_basin)
             if len(basin_indices) > 0:
                 basin_z = pos_act[basin_indices, 2]
-                z_pool_surf = min(float(np.percentile(basin_z, 75.0) + self.r_s), z_pool_max_allowed)
+                resting_mask = basin_z <= z_vol_surf + max(0.008, self.r_s * 3.0)
+                resting_z = basin_z[resting_mask] if np.any(resting_mask) else basin_z
+                p_top_z = float(np.percentile(resting_z, 98.0) + self.r_s * 0.5)
+                z_pool_surf = min(float(max(p_top_z, z_vol_surf + self.r_s * 0.5)), z_pool_max_allowed)
                 z_pool_surf = max(z_pool_surf, z_floor + self.r_s)
             else:
                 z_pool_surf = float(z_floor)
@@ -1896,11 +1938,39 @@ class FluidBodyTracker:
             d_c_xy = np.sqrt((pos_act[:, 0] - cutout.x) ** 2 + (pos_act[:, 1] - cutout.y) ** 2)
             all_cutout_mask |= d_c_xy <= cutout.r
 
-        all_drain_column_mask = np.zeros(len(pos_act), dtype=bool)
+        # Pre-compute distance and angular sector membership for all drain features
+        drain_dist_list: list[np.ndarray] = []
+        drain_sector_list: list[np.ndarray] = []
         for drain in ctx.drains:
-            d_d_xy = np.sqrt((pos_act[:, 0] - drain.x) ** 2 + (pos_act[:, 1] - drain.y) ** 2)
-            drain_rad = max(0.015, drain.r + self.r_s * 2.0)
-            all_drain_column_mask |= d_d_xy <= drain_rad
+            if getattr(drain, "is_arc", False) and drain.arc_radius > 0.0:
+                cx = drain.arc_center_x
+                cy = drain.arc_center_y
+                r_arc = drain.arc_radius
+                dx = pos_act[:, 0] - cx
+                dy = pos_act[:, 1] - cy
+                th = np.mod(np.arctan2(dx, dy), 2.0 * np.pi)
+                th_start = min(drain.theta_start, drain.theta_end)
+                th_end = max(drain.theta_start, drain.theta_end)
+                th_clamped = np.clip(th, th_start, th_end)
+                x_near = cx + r_arc * np.sin(th_clamped)
+                y_near = cy + r_arc * np.cos(th_clamped)
+                d_arc = np.sqrt((pos_act[:, 0] - x_near) ** 2 + (pos_act[:, 1] - y_near) ** 2)
+                th_margin = 0.12  # Clean sector separation between distinct spillways
+                in_sector = (th >= th_start - th_margin) & (th <= th_end + th_margin)
+                drain_dist_list.append(d_arc)
+                drain_sector_list.append(in_sector)
+            else:
+                d_pt = np.sqrt((pos_act[:, 0] - drain.x) ** 2 + (pos_act[:, 1] - drain.y) ** 2)
+                drain_dist_list.append(d_pt)
+                drain_sector_list.append(np.ones(len(pos_act), dtype=bool))
+
+        all_drain_column_mask = np.zeros(len(pos_act), dtype=bool)
+        for d_idx, drain in enumerate(ctx.drains):
+            d_d_xy = drain_dist_list[d_idx]
+            in_sector = drain_sector_list[d_idx]
+            drain_rad = max(0.025, drain.r + self.r_s * 4.0)
+            in_col = (d_d_xy <= drain_rad) | (in_sector & all_cutout_mask)
+            all_drain_column_mask |= in_col
 
         for p_idx, pocket in enumerate(ctx.pockets):
             d_p_xy = np.sqrt((pos_act[:, 0] - pocket.x) ** 2 + (pos_act[:, 1] - pocket.y) ** 2)
@@ -1920,17 +1990,20 @@ class FluidBodyTracker:
         z_terrace_max = max([t.z for t in ctx.terraces], default=z_lid)
         all_drain_wf_mask = np.zeros(len(pos_act), dtype=bool)
         for d_idx, drain in enumerate(ctx.drains):
-            d_d_xy = np.sqrt((pos_act[:, 0] - drain.x) ** 2 + (pos_act[:, 1] - drain.y) ** 2)
-            drain_rad = max(0.015, drain.r + self.r_s * 2.0)
-            in_drain_zone = d_d_xy <= drain_rad
+            d_d_xy = drain_dist_list[d_idx]
+            in_sector = drain_sector_list[d_idx]
+            drain_rad = max(0.025, drain.r + self.r_s * 4.0)
+            in_drain_zone = (d_d_xy <= drain_rad) | (in_sector & all_cutout_mask)
 
             # Check upstream inflow from both routes:
             # Route A: Fluid at lid shelf reaching drain aperture
             lid_inflow_fluid = (pos_act[:, 2] >= z_lid - max(0.008, self.r_s * 3.0)) & (
-                d_d_xy <= max(0.015, drain.r + self.r_s * 2.0)
+                (d_d_xy <= max(0.018, drain.r + self.r_s * 2.5)) | (in_sector & (d_d_xy <= 0.025))
             )
             # Route B: Fluid plunging directly from top terrace sheet into drain aperture
-            top_sheet_inflow_fluid = (pos_act[:, 2] >= z_plat_mid) & (d_d_xy <= max(0.020, drain.r + self.r_s * 3.0))
+            top_sheet_inflow_fluid = (pos_act[:, 2] >= z_plat_mid) & (
+                (d_d_xy <= max(0.025, drain.r + self.r_s * 3.5)) | (in_sector & (d_d_xy <= 0.030))
+            )
 
             has_drain_inflow = (np.count_nonzero(lid_inflow_fluid) >= 2) or (
                 np.count_nonzero(top_sheet_inflow_fluid) >= 2
@@ -1999,11 +2072,40 @@ class FluidBodyTracker:
         # Clusters for free splash droplets: group only closely connected particles
         cluster_indices = active_indices[is_cluster]
         if len(cluster_indices) > 0:
-            cluster_max_dist = max(0.006, self.r_s * 2.5)
+            cluster_max_dist = max(0.005, self.r_s * 2.2)
             cluster_subsets = cluster_particles(pos_arr[cluster_indices], max_dist=cluster_max_dist)
-            if len(cluster_subsets) > 30:
-                cluster_subsets = sorted(cluster_subsets, key=len, reverse=True)[:30]
-            for idx, c_subset in enumerate(cluster_subsets):
+
+            # Sub-split any cluster that spans across multiple vertical tiers (max dz <= 8mm)
+            refined_subsets: list[np.ndarray] = []
+            max_cluster_dz = max(0.008, self.r_s * 3.5)
+            for c_subset in cluster_subsets:
+                if len(c_subset) == 0:
+                    continue
+                pts_c = pos_arr[cluster_indices[c_subset]]
+                z_span = float(np.max(pts_c[:, 2]) - np.min(pts_c[:, 2]))
+                if z_span > max_cluster_dz and len(c_subset) >= 4:
+                    z_min_c = float(np.min(pts_c[:, 2]))
+                    n_bins = max(2, int(math.ceil(z_span / max_cluster_dz)))
+                    bin_edges = np.linspace(z_min_c, z_min_c + z_span + 1e-6, n_bins + 1)
+                    bin_ids = np.digitize(pts_c[:, 2], bin_edges) - 1
+                    for b_i in range(n_bins):
+                        sub_idx = c_subset[bin_ids == b_i]
+                        if len(sub_idx) > 0:
+                            refined_subsets.append(sub_idx)
+                else:
+                    refined_subsets.append(c_subset)
+
+            # Sort clusters deterministically by centroid coordinates for stable IDs across frames
+            def cluster_sort_key(c_sub: np.ndarray) -> tuple[float, float, float]:
+                pts_c = pos_arr[cluster_indices[c_sub]]
+                c_mean = np.mean(pts_c, axis=0)
+                return (round(float(c_mean[0]), 2), round(float(c_mean[1]), 2), -round(float(c_mean[2]), 3))
+
+            refined_subsets.sort(key=cluster_sort_key)
+            if len(refined_subsets) > 30:
+                refined_subsets = refined_subsets[:30]
+
+            for idx, c_subset in enumerate(refined_subsets):
                 c_indices = cluster_indices[c_subset]
                 child = FluidBody(
                     body_id=idx + 1,
