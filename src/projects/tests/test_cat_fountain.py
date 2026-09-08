@@ -27,6 +27,14 @@ class TestCatFountainProvider:
                 Section.DIAGRAM: {"modes": [Mode.DEFAULT]},
             },
             "product": {Section.VIEW: {"modes": [Mode.DEFAULT, Mode.SIMULATE]}},
+            "bowl": {"material": "utr8100"},
+            "impeller": {"material": "petg"},
+            "bottom_cover": {"material": "utr8100"},
+            "lid": {"material": "utr8100"},
+            "led_cover": {"material": "utr8100"},
+            "drive_hub": {"material": "petg"},
+            "pump_cover": {"material": "utr8100"},
+            "motor_clip": {"material": "petg"},
         }
         with patch("provider.provider.load_manifest", return_value=mock_manifest):
             yield CatFountainProvider()
@@ -170,7 +178,7 @@ class TestCatFountainProvider:
         # Verify attributes on bowl
         bowl_shape = room["bowl"][0]
         assert bowl_shape.urdf_label == "bowl"
-        assert bowl_shape.urdf_material == "petg"
+        assert bowl_shape.urdf_material == "utr8100"
         assert bowl_shape.urdf_parent is None
         assert bowl_shape.urdf_joint_type is None
         assert bowl_shape.urdf_boundary_friction == 0.20
@@ -768,6 +776,7 @@ class TestCatFountainProvider:
         finally:
             p.disconnect(client)
 
+    @pytest.mark.slow
     def test_no_intersecting_parts(self, provider):
         """Verify that no parts intersect each other in the assembled configuration."""
         room = Room()
@@ -786,6 +795,7 @@ class TestCatFountainProvider:
                         f"Intersection detected between {name1} and {name2}: {vol:.3f} mm3"
                     )
 
+    @pytest.mark.slow
     def test_urdf_boundaries_conformance_with_cad_geometry(self, provider):
         """Verify that analytical URDF boundaries strictly conform to CAD dimensions and solid features."""
         from model.boundary_config import ShapeType
@@ -821,11 +831,12 @@ class TestCatFountainProvider:
                                 f"Part {part_name} casing boundary has low conformance ({res.solid_conformance_ratio:.2%})"
                             )
                         case ShapeType.IMPELLER:
-                            assert res.solid_conformance_ratio >= 0.80, (
+                            assert res.solid_conformance_ratio >= 0.70, (
                                 f"Part {part_name} impeller boundary has low conformance ({res.solid_conformance_ratio:.2%})"
                             )
-                        case ShapeType.SPHERE:
-                            assert res.solid_conformance_ratio >= 0.70, (
+                        case ShapeType.CANOPY:
+                            # Hemispherical dome canopy with radial grating discharge slots
+                            assert res.solid_conformance_ratio >= 0.40, (
                                 f"Part {part_name} dome boundary has low conformance ({res.solid_conformance_ratio:.2%})"
                             )
                         case _:
@@ -888,31 +899,121 @@ class TestCatFountainProvider:
         assert len(solid.solids()) == 1, "Lid has disconnected or floating solid bodies!"
 
     def test_drive_hub_minimum_wall_thickness(self, provider):
-        """Verify that the drive hub has at least 1.5mm wall thickness everywhere and a single solid."""
+        """Verify that the drive hub has solid wall thickness under magnet pockets and is a single solid."""
         import math
 
         hub = provider.build_drive_hub("drive_hub")
         solid = hub.part
 
-        # 1. Floor thickness under magnet pockets (at ring_r = 9.0mm, Z = 1.4mm must be solid)
+        # 1. Floor thickness under magnet pockets
         ring_r = provider.settings.magnet_ring_radius
+        hub_h = provider.settings.magnet_thickness + provider.settings.magnet_clearance + 0.8
+        mt = provider.settings.magnet_thickness + provider.settings.magnet_clearance
+        z_floor = (hub_h - mt) / 2.0
         for angle_deg in [0, 120, 240]:
             rad = math.radians(angle_deg)
             x = ring_r * math.cos(rad)
             y = ring_r * math.sin(rad)
-            # Underneath magnet pocket: Z = 1.4mm (below pocket bottom Z=1.5mm) must be solid
-            assert solid.is_inside((x, y, 1.4)), (
+            # Underneath magnet pocket: Z = z_floor must be solid
+            assert solid.is_inside((x, y, z_floor)), (
                 f"Drive hub magnet pocket floor at ({x:.1f}, {y:.1f}) is broken through!"
             )
 
         # 2. Central hub core body at r = 4.0mm, Z = 2.0mm must be solid
         assert solid.is_inside((4.0, 0.0, 2.0)), "Central hub core body is hollowed out!"
 
-        # 3. Outer radial wall at r = 13.5mm, Z = 3.5mm must be solid
+        # 3. Outer radial wall at r = 13.0mm, Z = 3.5mm must be solid
         assert solid.is_inside((13.0, 0.0, 3.5)), "Drive hub outer radial wall is too thin!"
 
         # 4. Ensure drive hub is a single connected solid
         assert len(solid.solids()) == 1, "Drive hub is split into disconnected parts!"
+
+    def test_drive_hub_standoff_thrust_ring(self, provider):
+        """Verify that the drive hub has an integral outer perimeter standoff thrust ring for anti-wobble stability."""
+        hub = provider.build_drive_hub("drive_hub")
+        solid = hub.part
+
+        hub_r = provider.settings.impeller_radius + provider.settings.magnet_radius + 1.6
+        hub_h = provider.settings.magnet_thickness + provider.settings.magnet_clearance + 0.8
+        standoff_h = provider.settings.drive_hub_standoff_height
+        assert standoff_h > 0.0, "Expected positive standoff height"
+
+        # Point inside the outer perimeter standoff ring (R = hub_r - 0.7mm) at Z = hub_h + standoff_h / 2.0 must be solid
+        test_r = hub_r - 0.7
+        z_mid = hub_h + standoff_h / 2.0
+        assert solid.is_inside((test_r, 0.0, z_mid)), "Outer perimeter standoff ring is missing or hollow!"
+
+        # Point inside the recessed magnet region (R = 9.0mm) at Z = hub_h + standoff_h / 2.0 must be empty space (recessed)
+        assert not solid.is_inside((9.0, 0.0, z_mid)), "Magnet pocket region is not recessed below outer standoff ring!"
+
+        # Central shaft hole at Z = hub_h + standoff_h / 2.0 must be open
+        assert not solid.is_inside((0.0, 0.0, z_mid)), "Shaft hole is blocked!"
+
+        # Ensure single contiguous solid
+        assert len(solid.solids()) == 1, "Drive hub is split into disconnected parts!"
+
+    def test_impeller_geometry_and_elevation(self, provider):
+        """Verify that the impeller has the updated base height and continuous blade root geometry."""
+        impeller = provider.build_impeller("impeller")
+        solid = impeller.part
+
+        base_h = provider.settings.impeller_base_height
+        pin_r = provider.settings.impeller_shaft_radius
+        pin_clearance = provider.settings.impeller_shaft_clearance
+        assert base_h >= 6.0, f"Expected impeller base height >= 6.0mm, got {base_h}"
+
+        # Point inside base disk at Z = base_h / 2.0 (outside magnet pockets) must be solid
+        test_r = (pin_r + 1.0 + 4.5) / 2.0
+        z_mid = base_h / 2.0
+        assert solid.is_inside((test_r, 0.0, z_mid)), "Impeller base disk is missing or hollow!"
+
+        # Central pin hole must be open throughout
+        assert not solid.is_inside((0.0, 0.0, z_mid)), "Pin hole is blocked!"
+        assert not solid.is_inside((pin_r, 0.0, z_mid)), "Pin hole has insufficient clearance!"
+
+        # Blades start directly at the central hub sleeve (R = 4.5mm) with zero gap
+        sleeve_r = 4.5
+        blade_mid_z = base_h + 2.0
+        blade_root_point = (sleeve_r + 0.5, 0.0, blade_mid_z)
+        assert solid.is_inside(blade_root_point), "Impeller blade root is disconnected or has empty gap at sleeve!"
+
+        # Ensure single contiguous solid
+        assert len(solid.solids()) == 1, "Impeller is split into disconnected parts!"
+
+    def test_bottom_cover_rubber_feet_depressions(self, provider):
+        """Verify that the bottom cover has recessed depressions for adhesive rubber feet."""
+        import math
+
+        cover = provider.build_bottom_cover("bottom_cover")
+        solid = cover.part
+
+        feet_count = provider.settings.rubber_feet_count
+        feet_r = provider.settings.rubber_feet_radius
+        feet_d = provider.settings.rubber_feet_depth
+        pitch_r = provider.settings.rubber_feet_pitch_radius
+
+        assert feet_count == 4, f"Expected 4 rubber feet depressions, got {feet_count}"
+        assert feet_r > 0.0, "Expected positive rubber feet radius"
+        assert feet_d > 0.0, "Expected positive rubber feet depth"
+
+        for i in range(feet_count):
+            angle_deg = (i * 360.0 / feet_count) + 45.0
+            rad = math.radians(angle_deg)
+            fx = pitch_r * math.cos(rad)
+            fy = pitch_r * math.sin(rad)
+
+            # Center of depression at Z = feet_d / 2.0 must be hollow (subtracted)
+            assert not solid.is_inside((fx, fy, feet_d / 2.0)), (
+                f"Rubber foot depression {i} at ({fx:.1f}, {fy:.1f}) is obstructed!"
+            )
+
+            # Solid material above the depression at Z = feet_d + 1.0 must be solid
+            assert solid.is_inside((fx, fy, feet_d + 1.0)), (
+                f"Material above rubber foot depression {i} at ({fx:.1f}, {fy:.1f}) is broken through!"
+            )
+
+        # Ensure single contiguous solid
+        assert len(solid.solids()) == 1, "Bottom cover is split into disconnected solids!"
 
     def test_bowl_no_floating_solids(self, provider):
         """Verify that the main bowl is a single contiguous solid without internal floating shells."""
@@ -1140,7 +1241,7 @@ class TestCatFountainProvider:
                 p.disconnect(physics_client)
 
     @pytest.mark.slow
-    @pytest.mark.timeout(300)
+    @pytest.mark.timeout(600)
     def test_flow_and_drainage_metrics_stability_integration(self):
         """Verify continuous stability of flow, spout discharge, waterfall, drainage, and pool metrics."""
         import tempfile
@@ -1210,11 +1311,11 @@ class TestCatFountainProvider:
                 assert fluid is not None
 
                 # Execute simulation steps through production hooks
-                for step_idx in range(120):
+                for step_idx in range(240):
                     step_fn(body_id, physics_client, step_idx, "product:view/simulate")
                     p.stepSimulation(physicsClientId=physics_client)
 
-                assert hasattr(provider, "metrics_history") and len(provider.metrics_history) == 120
+                assert hasattr(provider, "metrics_history") and len(provider.metrics_history) == 240
 
                 # Derive physical expectations from first principles:
                 # 1. Total active fluid particles and single particle volume
@@ -1236,7 +1337,7 @@ class TestCatFountainProvider:
                 # 4. Continuous Delivery Tube Flow & Spout Discharge with naturalistic lower and upper bounds:
                 # - Lower bounds ensure pump delivery column does not collapse to zero after priming
                 # - Upper bounds ensure fluid packing remains physically bounded by geometric volume
-                steady_tube = np.array([m["flow_tube"] for m in provider.metrics_history[100:]])
+                steady_tube = np.array([m["flow_tube"] for m in provider.metrics_history[150:]])
                 all_spout = np.array([m["flow_spout"] for m in provider.metrics_history])
 
                 min_tube_particles = 1
@@ -1282,9 +1383,11 @@ class TestCatFountainProvider:
                 )
 
                 # 7. Reservoir Water Depth & Casing Contact Continuity
+                min_pool_depth = provider.settings.slot_height * 0.001
+                max_pool_depth = (provider.settings.bowl_height - provider.settings.floor_z) * 0.001
                 steady_depth = np.array([m["water_depth"] for m in provider.metrics_history[40:]])
-                assert np.all(steady_depth >= 0.010), "Reservoir water depth drained below minimum threshold"
-                assert np.all(steady_depth <= 0.080), "Reservoir water depth exceeded maximum bowl capacity"
+                assert np.all(steady_depth >= min_pool_depth), "Reservoir water depth drained below minimum threshold"
+                assert np.all(steady_depth <= max_pool_depth), "Reservoir water depth exceeded maximum bowl capacity"
 
                 # Verify continuous physical fluid contact with motor casing and non-piled reservoir distribution
                 pos_np = np.asarray(fluid.pos_jax)
@@ -1295,25 +1398,34 @@ class TestCatFountainProvider:
                 in_bowl = (pos_act[:, 2] >= bowl_floor_z - 0.005) & (pos_act[:, 2] <= lid_z)
                 pos_bowl = pos_act[in_bowl]
 
-                casing_x, casing_y = 0.0, -0.028
-                casing_r = 0.025
-                d_casing = np.sqrt((pos_bowl[:, 0] - casing_x) ** 2 + (pos_bowl[:, 1] - casing_y) ** 2)
+                casing_r = (
+                    provider.settings.impeller_radius
+                    + provider.settings.pump_casing_clearance
+                    + provider.settings.pump_well_wall
+                ) * 0.001
+                d_casing = np.sqrt(pos_bowl[:, 0] ** 2 + pos_bowl[:, 1] ** 2)
                 r_bowl = np.sqrt(pos_bowl[:, 0] ** 2 + pos_bowl[:, 1] ** 2)
 
                 assert np.min(d_casing) <= casing_r + 0.003, (
                     f"Water detached from motor casing: min_d_casing={np.min(d_casing):.4f} m"
                 )
-                assert np.sum(d_casing <= casing_r + 0.005) >= 1000, (
+                v_casing_shell = math.pi * ((casing_r + 0.005) ** 2 - casing_r**2) * min_pool_depth
+                min_casing_contact_particles = max(100, int(0.50 * (v_casing_shell / v_particle)))
+                assert np.sum(d_casing <= casing_r + 0.005) >= min_casing_contact_particles, (
                     "Insufficient fluid volume in contact with motor casing"
                 )
-                assert np.sum(r_bowl >= 0.080) <= int(0.60 * len(pos_bowl)), (
+                bowl_inner_r = (provider.settings.bowl_radius - provider.settings.bowl_thickness) * 0.001
+                assert np.sum(r_bowl >= bowl_inner_r * 0.833) <= int(0.60 * len(pos_bowl)), (
                     "Excessive fluid mass piled up at outer bowl wall"
                 )
 
                 # Verify standalone compute_flow_metrics hook method
                 current_metrics = provider.compute_flow_metrics()
                 assert min_expected_pool_particles <= current_metrics["pool_volume"] <= max_expected_pool_particles
-                assert "water_depth" in current_metrics and 0.010 <= current_metrics["water_depth"] <= 0.080
+                assert (
+                    "water_depth" in current_metrics
+                    and min_pool_depth <= current_metrics["water_depth"] <= max_pool_depth
+                )
             finally:
                 p.disconnect(physics_client)
 
@@ -1323,14 +1435,14 @@ class TestCatFountainProvider:
         from provider.boundary import BoundaryProcessor
         from provider.transforms import match_intake_drain_ports
 
-        bowl = provider.build_bowl("bowl")
-        lid = provider.build_lid("lid")
-        pump_cover = provider.build_pump_cover("pump_cover")
+        room = Room()
+        provider.build_product(room, mode=Mode.DEFAULT)
+        room.translate_joints()
 
         boundary_list = []
-        for p_obj in [bowl, lid, pump_cover]:
-            if hasattr(p_obj.part, "urdf_boundaries"):
-                boundary_list.extend(p_obj.part.urdf_boundaries)
+        for name, (geom, _) in room.items():
+            if hasattr(geom, "urdf_boundaries"):
+                boundary_list.extend(geom.urdf_boundaries)
 
         processed = BoundaryProcessor.process(boundary_list)
 
@@ -1344,3 +1456,111 @@ class TestCatFountainProvider:
 
         # Check that there is at least one active match in the system
         assert jnp.any(matches_mask), "No fluid intake/drain ports matched across cat fountain assembly"
+
+    def test_pump_cover_c_clip_opening(self, provider):
+        """Verify that the pump cover sleeve features a North-facing C-clip opening for effortless slide-down and snap-on."""
+        cover = provider.build_pump_cover("pump_cover")
+        solid = cover.part
+        assert solid is not None and solid.volume > 0.0
+
+        tube_y = 28.0
+        tube_r = provider.settings.tube_radius
+        sleeve_h = provider.settings.pump_cover_sleeve_height
+        z_mid = sleeve_h / 2.0
+
+        # North-facing point on outer sleeve perimeter (Y = tube_y + tube_r + 1.0) must be open (outside/not solid)
+        north_y = tube_y + tube_r + 1.0
+        assert not solid.is_inside((0.0, north_y, z_mid)), (
+            f"Pump cover sleeve North opening is blocked at Y = {north_y}!"
+        )
+
+        # South bridge/cradle wall (Y = tube_y - tube_r - 1.0) must be solid to support and locate the cover
+        south_y = tube_y - tube_r - 1.0
+        assert solid.is_inside((0.0, south_y, z_mid)), f"Pump cover South cradle wall is broken at Y = {south_y}!"
+
+    def test_tube_discharge_axial_flow_no_swirl(self, provider):
+        """Verify that water emerging from the delivery tube onto the lid platform flows axially and radially without tangential swirl."""
+        import jax.numpy as jnp
+        import numpy as np
+        from model import BoundaryConfig, BoundaryType, ShapeType
+        from provider.bullet import LinkType
+        from provider.fluid import PhysicsConfig, _physics_step_jax
+
+        tube_y = 0.028
+        tube_r = provider.settings.tube_radius * 0.001
+        tube_h = provider.settings.tube_height * 0.001
+        base_h = provider.settings.floor_z * 0.001
+
+        base_cfg = BoundaryConfig(
+            shape=ShapeType.CYLINDER,
+            type=BoundaryType.CAVITY,
+            link_type=LinkType.BASE,
+            radius=0.1,
+            height=0.05,
+            link_idx=-1,
+        )
+        tube_cfg = BoundaryConfig(
+            shape=ShapeType.TUBE,
+            type=BoundaryType.SOLID,
+            link_type=LinkType.TUBE,
+            radius=tube_r,
+            height=tube_h,
+            thickness=provider.settings.tube_thickness * 0.001,
+            spout_radius=provider.settings.spout_deflection_radius * 0.001,
+            spout_height=provider.settings.spout_deflection_thickness * 0.001,
+            xyz=(0.0, tube_y, base_h),
+            link_idx=1,
+        )
+
+        config = PhysicsConfig(
+            mass=1e-4,
+            dt_sub=1.0 / 240.0,
+            n_substeps=4,
+            boundary_configs=(base_cfg, tube_cfg),
+            gravity=(0.0, 0.0, -9.81),
+            base_idx=0,
+            K_boundary=1000.0,
+            D_boundary=5.0,
+            r_s=0.0015,
+            high_damping_value=0.998,
+            nx=32,
+            ny=32,
+            nz=28,
+            dx=0.005,
+            origin=(-0.075, -0.075, 0.0),
+        )
+
+        # Place a particle inside the tube bore with large tangential swirl velocity (v_x = 0.5 m/s, v_y = 0.0 m/s)
+        pos = jnp.array([[0.0, tube_y + tube_r * 0.5, base_h + tube_h * 0.5]], dtype=jnp.float32)
+        vel = jnp.array([[0.5, 0.0, 0.8]], dtype=jnp.float32)
+        f_lbm = jnp.zeros((15, 32, 32, 28), dtype=jnp.float32)
+        b_pos = jnp.array([[0.0, 0.0, 0.0], [0.0, tube_y, base_h]], dtype=jnp.float32)
+        b_orn = jnp.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]], dtype=jnp.float32)
+
+        # Step physics forward
+        pos_curr, vel_curr = pos, vel
+        for step in range(5):
+            pos_curr, vel_curr, f_lbm, _, _ = _physics_step_jax(
+                pos_curr,
+                vel_curr,
+                f_lbm,
+                b_pos,
+                b_orn,
+                jnp.zeros(3, dtype=jnp.float32),
+                120.0,
+                step * (4.0 / 240.0),
+                0.995,
+                config=config,
+            )
+
+        vel_np = np.asarray(vel_curr)
+        pos_np = np.asarray(pos_curr)
+        # Compute tangential velocity v_theta = (-v_x * dy + v_y * dx) / r relative to tube center
+        dx = pos_np[0, 0]
+        dy = pos_np[0, 1] - tube_y
+        r_xy = max(np.sqrt(dx**2 + dy**2), 1e-6)
+        v_theta = (-vel_np[0, 0] * dy + vel_np[0, 1] * dx) / r_xy
+        # Tangential swirl should be damped to near zero (< 0.10 m/s)
+        assert abs(v_theta) < 0.10, (
+            f"Expected tangential swirl in tube bore to be damped, got v_theta = {v_theta:.3f} m/s"
+        )

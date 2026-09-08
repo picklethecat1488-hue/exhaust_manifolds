@@ -43,7 +43,18 @@ import OCP.TopoDS  # type: ignore
 if not hasattr(OCP.TopoDS.TopoDS_Shape, "HashCode"):
     OCP.TopoDS.TopoDS_Shape.HashCode = lambda self, upper: id(self) % upper  # type: ignore
 
-from .provider import Provider, URDFMetadata, URDFBoundary
+from .provider import (
+    Provider,
+    URDFMetadata,
+    URDFBoundary,
+    IntakePort,
+    DrainPort,
+    TubePort,
+    FlowSlot,
+    SpoutDeflection,
+    ImpellerVanes,
+    MagneticCoupling,
+)
 from .types import (
     Mode,
     Section,
@@ -112,4 +123,5 @@ from .provider_router import ProviderRouter
 from .provider_manager import ProviderManager
 from .utils import load_manifest, discover_provider
 from .wiring_diagram import WiringDiagram
+from .blender import BlenderRenderer, CameraViewport, RenderConfig
 from model.wiring import Wiring

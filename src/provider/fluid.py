@@ -32,6 +32,7 @@ from model import (
     BoundaryParam,
     FluidBody,
     FluidBodyType,
+    FluidStage,
     FluidBodyTracker,
 )
 from provider.transforms import (
@@ -303,7 +304,7 @@ SHAPE_BOX = 2
 SHAPE_PLANE = 3
 SHAPE_IMPELLER = 4
 SHAPE_TUBE = 5
-SHAPE_SPHERE = 6
+SHAPE_CANOPY = 6
 SHAPE_CASING = 7
 
 # Integer identifiers for BoundaryType
@@ -844,15 +845,15 @@ def _make_grid_masks(
         is_plane = shape == SHAPE_PLANE
         is_solid_plane = _grid_mask_plane_jax(zb_loc, thickness)
 
-        # SPHERE
-        is_sphere = shape == SHAPE_SPHERE
-        is_solid_sphere = _grid_mask_sphere_jax(xb_loc**2 + yb_loc**2 + zb_loc**2, radius)
+        # CANOPY
+        is_canopy = shape == SHAPE_CANOPY
+        is_solid_canopy = _grid_mask_sphere_jax(xb_loc**2 + yb_loc**2 + zb_loc**2, radius)
 
         is_solid = jnp.where(is_cyl, is_solid_cyl, jnp.zeros(flat_shape, dtype=jnp.bool_))
         is_solid = jnp.where(is_tube, is_solid_tube, is_solid)
         is_solid = jnp.where(is_casing, is_solid_casing, is_solid)
         is_solid = jnp.where(is_plane, is_solid_plane, is_solid)
-        is_solid = jnp.where(is_sphere, is_solid_sphere, is_solid)
+        is_solid = jnp.where(is_canopy, is_solid_canopy, is_solid)
 
         # Analytical normal vectors for each shape type
         thick = jnp.maximum(thickness, dx)
@@ -908,7 +909,7 @@ def _make_grid_masks(
         norm_base_i = jnp.where(is_tube, tube_norm_base, norm_base_i)
         norm_base_i = jnp.where(is_casing, casing_norm_base, norm_base_i)
         norm_base_i = jnp.where(is_plane, plane_norm_base, norm_base_i)
-        norm_base_i = jnp.where(is_sphere, sphere_norm_base, norm_base_i)
+        norm_base_i = jnp.where(is_canopy, sphere_norm_base, norm_base_i)
 
         normal_grid_flat = jnp.where(is_solid[:, None] & (~is_imp), norm_base_i, normal_grid_flat)
 
@@ -1217,6 +1218,9 @@ def _compute_dynamic_fluid_bodies_jax(
     cavity_floor_z: float = 0.0,
     z_max_pool: float = 0.0,
     r_s: float = 0.003,
+    c_center: float = 4.0,
+    c_neighbor: float = 2.0,
+    c_diagonal: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Dynamically recompute physical fluid bodies, local column surface heights, and horizontal leveling gradients."""
     gp = (pos_local - origin) / dx
@@ -1231,13 +1235,27 @@ def _compute_dynamic_fluid_bodies_jax(
     min_z_grid = jnp.full((nx, ny), 10.0).at[ix, iy].min(jnp.where(in_basin, pos_local[:, 2], 10.0))
     col_count = jnp.zeros((nx, ny), dtype=jnp.float32).at[ix, iy].add(jnp.where(in_basin, 1.0, 0.0))
 
-    # 2. Dynamic 2D surface gradient for horizontal hydrostatic leveling
-    surf_pad = jnp.pad(surf_z_grid, ((1, 1), (1, 1)), mode="edge")
-    grad_x = (surf_pad[2:, 1:-1] - surf_pad[:-2, 1:-1]) / (2.0 * dx)
-    grad_y = (surf_pad[1:-1, 2:] - surf_pad[1:-1, :-2]) / (2.0 * dx)
+    # Inpaint empty cells with mean basin surface height to prevent false hole step artifacts in gradient
+    n_basin_pts = jnp.maximum(1.0, jnp.sum(jnp.where(in_basin, 1.0, 0.0)))
+    z_mean_basin = jnp.maximum(cavity_floor_z, jnp.sum(jnp.where(in_basin, pos_local[:, 2], 0.0)) / n_basin_pts)
+    has_samples = col_count > 0.0
+    surf_z_infilled = jnp.where(has_samples, surf_z_grid, z_mean_basin)
+
+    # 2. Dynamic 2D spatial surface smoothing and horizontal hydrostatic leveling gradient
+    surf_pad = jnp.pad(surf_z_infilled, ((1, 1), (1, 1)), mode="edge")
+    w_norm = c_center + 4.0 * c_neighbor + 4.0 * c_diagonal
+    surf_smooth = (
+        c_center * surf_pad[1:-1, 1:-1]
+        + c_neighbor * (surf_pad[2:, 1:-1] + surf_pad[:-2, 1:-1] + surf_pad[1:-1, 2:] + surf_pad[1:-1, :-2])
+        + c_diagonal * (surf_pad[2:, 2:] + surf_pad[:-2, :-2] + surf_pad[2:, :-2] + surf_pad[:-2, 2:])
+    ) / jnp.maximum(1e-4, w_norm)
+
+    smooth_pad = jnp.pad(surf_smooth, ((1, 1), (1, 1)), mode="edge")
+    grad_x = (smooth_pad[2:, 1:-1] - smooth_pad[:-2, 1:-1]) / (2.0 * dx)
+    grad_y = (smooth_pad[1:-1, 2:] - smooth_pad[1:-1, :-2]) / (2.0 * dx)
 
     # 3. Sample back to particle coordinates
-    p_surf_z = surf_z_grid[ix, iy]
+    p_surf_z = surf_smooth[ix, iy]
     p_min_z = min_z_grid[ix, iy]
     p_grad_x = grad_x[ix, iy]
     p_grad_y = grad_y[ix, iy]
@@ -1605,11 +1623,11 @@ def _compute_particle_forces_subroutine(
         dir_casing = d_in / dist_in
         dir_world = local_to_world_vector(dir_casing, casing_orn)
 
-        d_in_xy = jnp.sqrt((pos_casing[:, 0] - intake_pos_i[0]) ** 2 + (pos_casing[:, 1] - intake_pos_i[1]) ** 2)
+        dist_in_to_port = jnp.sqrt(jnp.sum((pos_casing - intake_pos_i) ** 2, axis=-1))
         in_suction = (
             has_intake_i
-            & (d_in_xy <= inlet_r_eff + 0.015)
-            & (pos_casing[:, 2] >= casing_h - 0.002)
+            & (dist_in_to_port <= inlet_r_eff + 0.025)
+            & (pos_casing[:, 2] >= -0.002)
             & (pos_casing[:, 2] <= casing_h + 0.030)
         )
         suction_strength = (v_tip * 2.0 + g_mag * 1.5) * jnp.clip(1.0 - dist_in / (inlet_r_eff + 0.025), 0.0, 1.0)
@@ -1695,6 +1713,12 @@ def _compute_particle_forces_subroutine(
         up_vector = local_to_world_vector(jnp.array([0.0, 0.0, 1.0]), tube_orn)
         up_world = up_vector[None, :] * pump_lift_scalar[:, None]
 
+        # Viscous pipe wall shear: straightens flow axially along the tube bore, eliminating helical impeller swirl
+        v_tube_xy_local = jnp.stack([v_tube[:, 0], v_tube[:, 1], jnp.zeros_like(v_tube[:, 2])], axis=-1)
+        tube_shear_accel_local = -v_tube_xy_local * 40.0
+        tube_shear_accel_world = local_to_world_vector(tube_shear_accel_local, tube_orn)
+        tube_bore_accel = up_world + tube_shear_accel_world
+
         # Radial spreading and outward deflection at the fountain spout opening (above tube exit)
         r_outer = b_params[i, BoundaryParam.R_OUTER]
         at_spout = (pos_tube[:, 2] > tube_h) & (pos_tube[:, 2] <= tube_h + 0.020) & (r_tube_xy <= r_outer + 0.020)
@@ -1711,12 +1735,22 @@ def _compute_particle_forces_subroutine(
         dome_disp = radial_unit_world * 0.85 + down_dir_world[None, :] * 0.45
         disp_mag = jnp.sqrt(jnp.sum(dome_disp**2, axis=-1, keepdims=True) + 1e-8)
         spout_out_dir = dome_disp / disp_mag
-        spout_accel = spout_out_dir * (g_mag * 2.0 + v_flow_est * 2.0)
+
+        # Straighten any residual azimuthal/tangential velocity at spout
+        v_tube_tangential_local = jnp.stack(
+            [-pos_tube[:, 1] / r_xy_safe, pos_tube[:, 0] / r_xy_safe, jnp.zeros_like(pos_tube[:, 0])],
+            axis=-1,
+        )
+        v_tangential_mag = jnp.sum(v_tube * v_tube_tangential_local, axis=-1, keepdims=True)
+        spout_tangential_damp_world = (
+            -local_to_world_vector(v_tube_tangential_local * v_tangential_mag, tube_orn) * 25.0
+        )
+        spout_accel = spout_out_dir * (g_mag * 2.0 + v_flow_est * 2.0) + spout_tangential_damp_world
 
         tube_pump_accel_i = jnp.where(
             at_spout[:, None],
             spout_accel,
-            jnp.where(in_tube[:, None], up_world, 0.0),
+            jnp.where(in_tube[:, None], tube_bore_accel, 0.0),
         )
 
         is_tube = shape == SHAPE_TUBE
@@ -1837,28 +1871,27 @@ def _compute_particle_forces_subroutine(
         pos_b, dx, origin, nx, ny, nz, cavity_floor_z=cavity_floor_z, z_max_pool=z_max_pool, r_s=r_s
     )
 
-    # 1. Dynamic hydrostatic support and vertical column pressure
+    # 1. Dynamic hydrostatic support, vertical wave damping, and impact deceleration for smooth pool water
     depth_pressure = jnp.clip((p_surf_z - pos_b[:, 2]) / (4.0 * r_s), 0.0, 4.0)
-    cushion_accel_z = -jnp.minimum(v_z_b, 0.0) * 35.0
-    total_support_z = g_mag * (1.0 + depth_pressure * 0.35) + cushion_accel_z
+    cushion_accel_z = -jnp.minimum(v_z_b, 0.0) * 25.0  # Decelerate falling waterfall droplets
+    vertical_wave_damping_z = -v_z_b * 35.0  # Viscous vertical damping arresting sloshing oscillations
+    total_support_z = g_mag * (1.0 + depth_pressure * 0.25) + cushion_accel_z + vertical_wave_damping_z
+
+    # Continuous C1 surface taper preventing bang-bang force switching at the free surface
+    s_taper = jnp.clip(1.0 - (pos_b[:, 2] - p_surf_z) / (2.0 * r_s), 0.0, 1.0)
+    s_surf_taper = s_taper * s_taper * (3.0 - 2.0 * s_taper)
+    support_scale = jnp.where(in_fluid_body, s_surf_taper, 0.0)
 
     hydrostatic_support_world = local_to_world_vector(
         jnp.stack([jnp.zeros_like(r_b), jnp.zeros_like(r_b), total_support_z], axis=-1),
         base_orn_b,
     )
-    hydrostatic_accel = jnp.where(
-        in_fluid_body[:, None],
-        hydrostatic_support_world,
-        0.0,
-    )
+    hydrostatic_accel = support_scale[:, None] * hydrostatic_support_world
 
-    # 2. Dynamic horizontal leveling gradient derived continuously from the moving surface height field
-    level_accel_world = local_to_world_vector(level_grad_local * (g_mag * 0.40), base_orn_b)
-    leveling_accel = jnp.where(
-        in_fluid_body[:, None],
-        level_accel_world,
-        0.0,
-    )
+    # 2. Dynamic horizontal leveling gradient derived continuously from the smoothed surface height field
+    level_grad_damped = level_grad_local * (g_mag * 0.15) - v_b * 1.5
+    level_accel_world = local_to_world_vector(level_grad_damped, base_orn_b)
+    leveling_accel = support_scale[:, None] * level_accel_world
 
     # 3. Dynamic replenishment draw toward active pump intake sink:
     # When water is intaked into the pump system, surrounding reservoir fluid near the casing
@@ -1904,7 +1937,6 @@ def _ccd_planar_shelf_boundary(
     pos_next_loc: jnp.ndarray,
     v_rel_local: jnp.ndarray,
     z_plane: float,
-    normal_sign: float,
     radius: float,
     shelf_depth: float,
     has_drain: jnp.ndarray,
@@ -2175,8 +2207,8 @@ def _ccd_tube_cylinder_boundary(
     v_x_outer = v_rel_local[:, 0] - v_rad_inward * (pos_next_loc[:, 0] / r_safe)
     v_y_outer = v_rel_local[:, 1] - v_rad_inward * (pos_next_loc[:, 1] / r_safe)
 
-    v_x_inner = v_rel_local[:, 0] - v_rad_outward * (pos_next_loc[:, 0] / r_safe)
-    v_y_inner = v_rel_local[:, 1] - v_rad_outward * (pos_next_loc[:, 1] / r_safe)
+    v_x_inner = (v_rel_local[:, 0] - v_rad_outward * (pos_next_loc[:, 0] / r_safe)) * 0.80
+    v_y_inner = (v_rel_local[:, 1] - v_rad_outward * (pos_next_loc[:, 1] / r_safe)) * 0.80
 
     v_x = jnp.where(penetrating_outer, v_x_outer, jnp.where(penetrating_inner, v_x_inner, v_rel_local[:, 0]))
     v_y = jnp.where(penetrating_outer, v_y_outer, jnp.where(penetrating_inner, v_y_inner, v_rel_local[:, 1]))
@@ -2248,14 +2280,14 @@ def _apply_boundary_ccd_subroutine(
         pos_next = jnp.where(is_pl, pos_pl, pos_next)
         vel_next = jnp.where(is_pl, vel_pl, vel_next)
 
-        # 2. Spherical obstacles (such as the spout deflection dome)
-        is_sph = (shape_k == SHAPE_SPHERE) & (b_types[k] == 0)
-        sph_t = b_params[k, BoundaryParam.THICKNESS]
-        pos_sph, vel_sph = _ccd_sphere_obstacle_boundary(
-            pos_curr, pos_next, vel_next, b_params[k, BoundaryParam.R_OUTER], b_pos_arr[k], sph_t
+        # 2. Spherical obstacles / canopy (such as the spout deflection dome)
+        is_canopy = (shape_k == SHAPE_CANOPY) & (b_types[k] == 0)
+        canopy_t = b_params[k, BoundaryParam.THICKNESS]
+        pos_canopy, vel_canopy = _ccd_sphere_obstacle_boundary(
+            pos_curr, pos_next, vel_next, b_params[k, BoundaryParam.R_OUTER], b_pos_arr[k], canopy_t
         )
-        pos_next = jnp.where(is_sph, pos_sph, pos_next)
-        vel_next = jnp.where(is_sph, vel_sph, vel_next)
+        pos_next = jnp.where(is_canopy, pos_canopy, pos_next)
+        vel_next = jnp.where(is_canopy, vel_canopy, vel_next)
 
         # 3. Solid lid tray drinking shelf (cylinder with drainage hole and tube hole, exposed to air)
         is_submerged_k = b_params[k, BoundaryParam.IS_SUBMERGED] > 0.5
@@ -2284,7 +2316,6 @@ def _apply_boundary_ccd_subroutine(
             pos_lid_next,
             v_lid_k,
             z_plane=0.0,
-            normal_sign=1.0,
             radius=b_params[k, BoundaryParam.RADIUS],
             shelf_depth=b_params[k, BoundaryParam.SHELF_DEPTH],
             has_drain=b_params[k, BoundaryParam.HAS_DRAIN] > 0.5,
@@ -2428,12 +2459,11 @@ def _integrate_particles_subroutine(
     in_tube = jnp.where(has_tube, in_tube, jnp.zeros(pos_curr.shape[0], dtype=jnp.bool_))
 
     max_ceiling_z = jnp.where(base_idx != -1, b_params[base_idx, BoundaryParam.MAX_CEILING_Z], base_height)
-    influence_h = jnp.minimum(tube_h + 0.049, max_ceiling_z)
 
     outside_base_raw = (
         (r_local > base_radius)
         | (pos_local_check[:, 2] < cavity_floor_z)
-        | (pos_local_check[:, 2] > max_ceiling_z + 0.005)
+        | (pos_local_check[:, 2] > max_ceiling_z + 0.015)
     ) & (~in_tube)
     outside_base = jnp.where(base_idx != -1, outside_base_raw, jnp.zeros(pos_curr.shape[0], dtype=jnp.bool_))
 
@@ -2460,7 +2490,6 @@ def _integrate_particles_subroutine(
         pos_local_next,
         v_rel_local,
         z_plane=cavity_floor_z,
-        normal_sign=1.0,
         radius=base_radius,
         shelf_depth=0.020,
         has_drain=jnp.bool_(False),
@@ -3057,6 +3086,9 @@ class Fluid:
         self.min_distance_threshold = config.min_distance_threshold
         self.stiffness_boundary = config.stiffness_boundary
         self.damping_boundary = config.damping_boundary
+        self.surface_smooth_center_coeff = config.surface_smooth_center_coeff
+        self.surface_smooth_neighbor_coeff = config.surface_smooth_neighbor_coeff
+        self.surface_smooth_diagonal_coeff = config.surface_smooth_diagonal_coeff
 
         self.volume_threshold_liters = config.volume_threshold_liters
         self.fallen_threshold_liters = config.fallen_threshold_liters
@@ -3359,19 +3391,21 @@ class Fluid:
         """
         if not hasattr(self, "fluid_body_tracker"):
             self.fluid_body_tracker = FluidBodyTracker(r_s=self.r_s)
-        z_offset = self.processed_boundaries.cavity_z_offset
-        lid_b = self.processed_boundaries.lid
-        tube_b = self.processed_boundaries.tube_wall
-        z_lid = lid_b.z_floor if lid_b is not None else self.processed_boundaries.cavity_height
-        tube_y = tube_b.pos[1] if tube_b is not None else (lid_b.tube_y if lid_b is not None else 0.0)
-        tube_r = tube_b.inner_radius if tube_b is not None else (lid_b.tube_r if lid_b is not None else 0.0)
+
+        pos = (
+            np.asarray(self.last_positions, dtype=np.float32)
+            if self.last_positions is not None
+            else np.zeros((0, 3), dtype=np.float32)
+        )
+        vel = (
+            np.asarray(self.last_velocities, dtype=np.float32)
+            if self.last_velocities is not None
+            else np.zeros_like(pos)
+        )
         return self.fluid_body_tracker.update_bodies(
-            self.last_positions,
-            self.last_velocities,
-            z_floor=z_offset,
-            z_lid=z_lid,
-            tube_y=tube_y,
-            tube_r=tube_r,
+            pos,
+            vel,
+            cad_context=self.processed_boundaries.fluid_context,
         )
 
     def get_boundary_voxels(self) -> dict[str, np.ndarray]:
@@ -3636,7 +3670,7 @@ class Fluid:
 
             if shape_type == p.GEOM_SPHERE:
                 b_cfg = BoundaryConfig(
-                    shape=ShapeType.SPHERE,
+                    shape=ShapeType.CANOPY,
                     type=BoundaryType.SOLID,
                     radius=radius,
                     xyz=b_pos,
@@ -3897,12 +3931,42 @@ class Fluid:
         self._update_state_tracker()
         self.current_sim_time += 1.0 / 240.0
 
+    def get_water_meshes(self, bodies: Optional[list[Any]] = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Compute watertight 3D triangle meshes for all active dynamic fluid bodies.
+
+        Args:
+            bodies: Optional list of pre-computed FluidBody instances. If None, computes bodies.
+
+        Returns:
+            Dictionary mapping fluid body identifier (e.g. 'pool_1', 'stream_2', 'sheet_3')
+            to a tuple of (vertices_array, faces_array).
+        """
+        if bodies is None:
+            bodies = self.get_fluid_bodies()
+        meshes = {}
+        for body in bodies:
+            name = body.display_name
+            verts, faces = body.to_mesh()
+            if len(verts) > 0 and len(faces) > 0:
+                meshes[name] = (verts, faces)
+        return meshes
+
     def _update_state_tracker(self) -> None:
-        """Synchronize particle positions, colors, radii, and boundary voxels to state tracker."""
+        """Synchronize particle positions, colors, radii, water meshes, and boundary voxels to state tracker."""
         if self.state_tracker is not None:
-            self.state_tracker.particle_positions = self.get_particle_positions()
-            self.state_tracker.particle_colors = self.get_particle_colors()
-            self.state_tracker.particle_radii = self.get_particle_radii()
+            if get_env_bool("SHOW_WATER_VOXELS", False):
+                self.state_tracker.particle_positions = self.get_particle_positions()
+                self.state_tracker.particle_colors = self.get_particle_colors()
+                self.state_tracker.particle_radii = self.get_particle_radii()
+            else:
+                self.state_tracker.particle_positions = []
+                self.state_tracker.particle_colors = []
+                self.state_tracker.particle_radii = []
+
+            bodies = self.get_fluid_bodies()
+            self.state_tracker.fluid_bodies = bodies
+            self.state_tracker.water_meshes = self.get_water_meshes(bodies=bodies)
+
             if get_env_bool("SHOW_BOUNDARY_VOXELS", False):
                 self.state_tracker.boundary_voxels = self.get_boundary_voxels()
             else:

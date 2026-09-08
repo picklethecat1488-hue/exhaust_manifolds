@@ -51,6 +51,17 @@ class FluidConfig(BaseModel):
         default=1e-6, description="Minimum distance threshold to prevent numerical divide-by-zero errors."
     )
 
+    # --- Surface Smoothing Polynomial Kernel Coefficients ---
+    surface_smooth_center_coeff: float = Field(
+        default=4.0, description="Center weight for 2D separable surface smoothing polynomial kernel."
+    )
+    surface_smooth_neighbor_coeff: float = Field(
+        default=2.0, description="Orthogonal neighbor weight for 2D separable surface smoothing polynomial kernel."
+    )
+    surface_smooth_diagonal_coeff: float = Field(
+        default=1.0, description="Diagonal neighbor weight for 2D separable surface smoothing polynomial kernel."
+    )
+
     # --- Boundary Collision Properties ---
     stiffness_boundary: float = Field(default=1000.0, description="Boundary collision penalty stiffness coefficient.")
     damping_boundary: float = Field(default=5.0, description="Boundary collision penalty damping coefficient.")

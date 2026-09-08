@@ -29,6 +29,13 @@ from provider import (
     URDFBoundaryType,
     URDFJointType,
     URDFMotorType,
+    IntakePort,
+    DrainPort,
+    TubePort,
+    FlowSlot,
+    SpoutDeflection,
+    ImpellerVanes,
+    MagneticCoupling,
     LinkType,
     WiringDiagram,
 )
@@ -537,21 +544,20 @@ class CatFountainProvider(Provider):
 
             with URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "utr8100",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.ANALYTICAL,
             ):
-                URDFBoundary(
+                with URDFBoundary.from_shape(
                     reservoir_shape,
                     link_type=LinkType.BASE,
+                    shape=ShapeType.CYLINDER,
                     type=BoundaryType.CAVITY,
-                    height=(h - floor_z + self.settings.spout_length) * 0.001,
-                    thickness=0.0035,
-                    has_tube=True,
-                    tube_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                    shelf_depth=self.settings.lid_pocket_cavity_height * 0.001,
-                )
+                    thickness=t * 0.001,
+                ):
+                    TubePort(location=Location((0.0, tube_y, 0.0)), radius=tube_in_r * 0.001)
+
                 with Locations((0.0, 28.0, floor_z)):
                     tube_geom = Cylinder(
                         radius=self.settings.tube_radius,
@@ -559,29 +565,24 @@ class CatFountainProvider(Provider):
                         align=(Align.CENTER, Align.CENTER, Align.MIN),
                         mode=Mode.PRIVATE,
                     )
-                URDFBoundary(
+                with URDFBoundary.from_shape(
                     tube_geom,
                     link_type=LinkType.TUBE,
                     shape=ShapeType.TUBE,
                     type=BoundaryType.SOLID_CAVITY,
-                    radius=self.settings.tube_radius * 0.001,
                     thickness=self.settings.tube_thickness * 0.001,
-                    height=self.settings.tube_height * 0.001,
-                    slot_height=9.0 * 0.001,
-                    slot_width=8.0 * 0.001,
-                    spout_radius=(self.settings.spout_deflection_radius + 1.0) * 0.001,
-                    spout_height=(self.settings.spout_deflection_thickness + 9.0) * 0.001,
-                    has_intake=True,
-                    intake_pos=(0.0, 0.0, 0.0),
-                    intake_normal=(0.0, 0.0, -1.0),
-                    intake_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                    has_drain=True,
-                    drain_pos=(0.0, 0.0, self.settings.tube_height * 0.001),
-                    drain_normal=(0.0, 0.0, 1.0),
-                    drain_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                    xyz=(0.0, 28.0 * 0.001, floor_z * 0.001),
-                    rpy=(0.0, 0.0, 0.0),
-                )
+                ):
+                    IntakePort(location=Location((0.0, 0.0, 0.0), (0, -90, 0)), radius=tube_in_r * 0.001)
+                    DrainPort(
+                        location=Location((0.0, 0.0, self.settings.tube_height), (0, 0, 0)),
+                        radius=tube_in_r * 0.001,
+                    )
+                    FlowSlot(height=9.0 * 0.001, width=8.0 * 0.001)
+                    SpoutDeflection(
+                        radius=(self.settings.spout_deflection_radius + 1.0) * 0.001,
+                        height=(self.settings.spout_deflection_thickness + 9.0) * 0.001,
+                    )
+
                 casing_thick = (casing_r - chamber_r) * 0.001
                 with Locations((0.0, 0.0, floor_z)):
                     casing_geom = Cylinder(
@@ -590,38 +591,27 @@ class CatFountainProvider(Provider):
                         align=(Align.CENTER, Align.CENTER, Align.MIN),
                         mode=Mode.PRIVATE,
                     )
-                URDFBoundary(
+                with URDFBoundary.from_shape(
                     casing_geom,
                     link_type=LinkType.CASING,
                     shape=ShapeType.CASING,
                     type=BoundaryType.SOLID_CAVITY,
-                    radius=casing_r * 0.001,
                     thickness=casing_thick,
-                    height=10.0 * 0.001,
-                    slot_height=9.0 * 0.001,  # Slot opening from Z = 0 to 9mm
-                    slot_width=8.0 * 0.001,
-                    tube_pos=(0.0, 28.0 * 0.001, 0.0),
-                    cutoff_y=0.0,
-                    ceiling_thickness=0.0,
-                    has_intake=True,
-                    intake_pos=(0.0, 0.0, 10.0 * 0.001),
-                    intake_normal=(0.0, 0.0, 1.0),
-                    intake_radius=self.settings.pump_inlet_radius * 0.001,
-                    has_drain=True,
-                    drain_pos=(0.0, 28.0 * 0.001, 0.0),
-                    drain_normal=(0.0, 1.0, 0.0),
-                    drain_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
                     is_submerged=True,
-                    xyz=(0.0, 0.0, floor_z * 0.001),
-                    rpy=(0.0, 0.0, 0.0),
-                )
+                ):
+                    IntakePort(
+                        location=Location((0.0, -casing_r, (self.settings.pump_inlet_height / 2.0 - 1.5)), (0, -90, 0)),
+                        radius=min(self.settings.pump_inlet_width, self.settings.pump_inlet_height) * 0.5 * 0.001,
+                    )
+                    DrainPort(location=Location((0.0, 28.0, 0.0), (0, 90, 0)), radius=tube_in_r * 0.001)
+                    TubePort(location=Location((0.0, 28.0, 0.0), (0, 0, 0)))
+                    FlowSlot(height=9.0 * 0.001, width=8.0 * 0.001)
 
         # Define joints
-        hub_h = self.settings.magnet_thickness + self.settings.magnet_clearance + 1.5
-        motor_shaft_z = floor_z - (self.settings.pump_well_wall + hub_h + 0.35)
-        RigidJoint("impeller_post", bowl.part, Location((0, 0, floor_z)))
+        motor_shaft_z = floor_z - 17.5 + self.settings.motor_clip_thickness + 9.3
+        RigidJoint("impeller_post", bowl.part, Location((0, 0, floor_z + 2.0)))
         RigidJoint("motor_shaft", bowl.part, Location((0, 0, motor_shaft_z)))
-        RigidJoint("pump_cover_seat", bowl.part, Location((0, 0, floor_z + 8.5)))
+        RigidJoint("pump_cover_seat", bowl.part, Location((0, 0, floor_z + 10.0)))
         RigidJoint("motor_clip_seat", bowl.part, Location((0, 0, floor_z - 17.5)))
         RigidJoint("lid_seat", bowl.part, Location((0, 0, h)))
         RigidJoint("cover_seat", bowl.part, Location((0, 0, 0)))
@@ -656,29 +646,34 @@ class CatFountainProvider(Provider):
     ) -> BuildPart:
         """Build the lightweight centrifugal impeller (magnetic-drive)."""
         hub_r = self.settings.impeller_radius + self.settings.magnet_radius + 1.0
-        hub_h = 4.0
+        hub_h = self.settings.impeller_base_height
         impeller_r = hub_r + 4.0
         pin_r = self.settings.impeller_shaft_radius
+        pin_clearance = self.settings.impeller_shaft_clearance
+        sleeve_r = 4.5
         mr = self.settings.magnet_radius + self.settings.magnet_clearance
         mt = self.settings.magnet_thickness + self.settings.magnet_clearance
         ring_r = self.settings.magnet_ring_radius
 
         with BuildPart() as impeller:
             # Impeller Hub base (carrying the magnets)
-            Cylinder(radius=hub_r, height=hub_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
+            with Locations((0, 0, 0)):
+                Cylinder(radius=hub_r, height=hub_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
 
-            # Central guide post sleeve (protrudes up to 8.0mm for stability on the post)
-            Cylinder(radius=4.5, height=8.0, align=(Align.CENTER, Align.CENTER, Align.MIN))
+            # Central guide post sleeve (protrudes up to 10.0mm for stability on the post)
+            with Locations((0, 0, 0)):
+                Cylinder(radius=sleeve_r, height=10.0, align=(Align.CENTER, Align.CENTER, Align.MIN))
 
-            # Subtract guide post central hole (radius 2.65mm for clearance on 2.5mm pin)
+            # Subtract guide post central hole (with generous clearance for free rotation after resin coating)
+            # Rests directly on top of the bowl's 2.0mm post flange shoulder, elevating the base disk 2.0mm off the floor
             Cylinder(
-                radius=pin_r + 0.15, height=12.0, align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.SUBTRACT
+                radius=pin_r + pin_clearance,
+                height=14.0,
+                align=(Align.CENTER, Align.CENTER, Align.MIN),
+                mode=Mode.SUBTRACT,
             )
 
-            # Subtract recess for guide post flange (radius 4.2mm for clearance on 4.0mm flange, depth 2.2mm)
-            Cylinder(radius=pin_r + 1.7, height=2.2, align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.SUBTRACT)
-
-            # Subtract 4 magnet pockets on the bottom face (Z = 0)
+            # Subtract 4 magnet pockets on the bottom face of the base disk
             for i in range(self.settings.magnet_count):
                 angle = i * (360.0 / self.settings.magnet_count)
                 with Locations(Rot(0, 0, angle)):
@@ -687,19 +682,20 @@ class CatFountainProvider(Provider):
                             radius=mr, height=mt, align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.SUBTRACT
                         )
 
-            # Add radial blades on the top face of the hub base (Z = hub_h = 4.0)
+            # Add radial blades on the top face of the hub base (Z = hub_h)
+            # Starting directly at the central hub sleeve (sleeve_r) with zero empty space
             blade_h = 4.0
-            blade_len = hub_r - 6.0
+            blade_len = hub_r - sleeve_r
             num_blades = self.settings.impeller_blades
             for i in range(num_blades):
                 angle = i * (360.0 / num_blades)
                 with Locations(Location((0, 0, hub_h)) * Rot(0, 0, angle)):
-                    with Locations((6.0, 0, 0)):
+                    with Locations((sleeve_r, 0, 0)):
                         Box(blade_len, 1.2, blade_h, align=(Align.MIN, Align.CENTER, Align.MIN))
 
             with URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "petg",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.ANALYTICAL,
@@ -712,23 +708,22 @@ class CatFountainProvider(Provider):
                 magnet_count=self.settings.magnet_count,
                 impeller_shaft_radius=self.settings.impeller_shaft_radius,
             ):
-                URDFBoundary(
-                    impeller,
+                with URDFBoundary.from_shape(
+                    impeller.part,
                     link_type=LinkType.IMPELLER,
                     shape=ShapeType.IMPELLER,
                     type=BoundaryType.SOLID,
                     radius=impeller_r * 0.001,
-                    height=cast(URDFShape, impeller.part).urdf_height,
                     thickness=pin_r * 0.001,
-                    vane_twist=self.settings.vane_twist,
-                    vane_thickness=1.2 * 0.001,
-                    num_vanes=num_blades,
-                    magnet_radius=self.settings.magnet_radius,
-                    magnet_thickness=self.settings.magnet_thickness,
-                    pump_well_wall=self.settings.pump_well_wall,
-                    magnet_count=self.settings.magnet_count,
-                    impeller_shaft_radius=self.settings.impeller_shaft_radius,
-                )
+                ):
+                    ImpellerVanes(count=num_blades, twist=self.settings.vane_twist, thickness=1.2 * 0.001)
+                    MagneticCoupling(
+                        radius=self.settings.magnet_radius,
+                        thickness=self.settings.magnet_thickness,
+                        count=self.settings.magnet_count,
+                        well_wall=self.settings.pump_well_wall,
+                        shaft_radius=self.settings.impeller_shaft_radius,
+                    )
 
         RevoluteJoint(label="pin", to_part=impeller.part, axis=Axis((0, 0, 0), (0, 0, 1)), angular_range=(0, 360))
 
@@ -781,9 +776,28 @@ class CatFountainProvider(Provider):
             with Locations((0, -cover_r, 0.0)):
                 Box(opening_w, 20.0, 10.0, align=(Align.CENTER, Align.CENTER, Align.CENTER), mode=Mode.SUBTRACT)
 
+            # Symmetrically spaced depressions for adhesive rubber feet on the bottom face (Z = 0)
+            feet_r = self.settings.rubber_feet_radius
+            feet_d = self.settings.rubber_feet_depth
+            pitch_r = self.settings.rubber_feet_pitch_radius
+            feet_count = self.settings.rubber_feet_count
+            if feet_count > 0 and feet_r > 0.0 and feet_d > 0.0:
+                for i in range(feet_count):
+                    angle_deg = (i * 360.0 / feet_count) + 45.0
+                    rad = math.radians(angle_deg)
+                    fx = pitch_r * math.cos(rad)
+                    fy = pitch_r * math.sin(rad)
+                    with Locations((fx, fy, 0.0)):
+                        Cylinder(
+                            radius=feet_r,
+                            height=feet_d,
+                            align=(Align.CENTER, Align.CENTER, Align.MIN),
+                            mode=Mode.SUBTRACT,
+                        )
+
             URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "utr8100",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,
@@ -927,53 +941,56 @@ class CatFountainProvider(Provider):
                         mode=Mode.SUBTRACT,
                     )
 
+        # Define joints and fluid ports
+        intake_z = self.settings.lid_pocket_thickness - 0.25
+        RigidJoint("intake_port", lid.part, Location((0.0, tube_y, intake_z), (0, 180, 0)))
+        RigidJoint("drain_port", lid.part, Location((0.0, cutout_y, 0.0), (0, 0, 0)))
+        RigidJoint("tube_port", lid.part, Location((0.0, tube_y, intake_z), (0, 0, 0)))
+        RigidJoint("mount", lid.part, Location((0, 0, step_d)))
+
+        # Define CAD feature geometry primitives for analytical boundaries
+        with Locations((0, 0, self.settings.lid_pocket_z_offset)):
+            pocket_geom = Cylinder(
+                radius=self.settings.lid_pocket_radius,
+                height=self.settings.lid_pocket_cavity_height,
+                align=(Align.CENTER, Align.CENTER, Align.MIN),
+                mode=Mode.PRIVATE,
+            )
+        with Locations((0, tube_y, 6.0)):
+            dome_geom = Sphere(radius=dome_out_r, mode=Mode.PRIVATE)
+
         with URDFMetadata(
             geometry=lid,
             label=target,
-            material=self.settings.material,
+            material=self.get_material(target) or "utr8100",
             density=self.settings.density,
             boundary_friction=self.settings.boundary_friction,
             collision_type=URDFCollisionType.ANALYTICAL,
             parent="bowl",
             joint_type=URDFJointType.FIXED,
         ):
-            URDFBoundary(
-                lid.part,
+            with URDFBoundary.from_shape(
+                pocket_geom,
                 link_type=LinkType.LID,
                 shape=ShapeType.CYLINDER,
                 type=BoundaryType.CAVITY,
-                radius=self.settings.lid_pocket_radius * 0.001,
-                height=self.settings.lid_pocket_cavity_height * 0.001,
                 thickness=self.settings.lid_pocket_thickness * 0.001,
-                xyz=(0.0, 0.0, self.settings.lid_pocket_z_offset * 0.001),
-                rpy=(0.0, 0.0, 0.0),
-                has_intake=True,
-                intake_pos=(0.0, tube_y * 0.001, 0.00175),
-                intake_normal=(0.0, 0.0, 1.0),
-                intake_radius=platform_r * 0.001,
-                has_drain=True,
-                drain_pos=(0.0, cutout_y * 0.001, 0.0),
-                drain_normal=(0.0, 0.0, 1.0),
-                drain_radius=cutout_r * 0.001,
-                has_tube=True,
-                tube_pos=(0.0, tube_y * 0.001, 0.00175),
-                tube_normal=(0.0, 0.0, 1.0),
-                tube_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                shelf_depth=self.settings.lid_pocket_thickness * 0.001,
-            )
+            ):
+                IntakePort(location=Location((0.0, tube_y, intake_z), (0, 180, 0)), radius=platform_r * 0.001)
+                DrainPort(location=Location((0.0, cutout_y, 0.0), (0, 0, 0)), radius=cutout_r * 0.001)
+                TubePort(
+                    location=Location((0.0, tube_y, intake_z), (0, 0, 0)),
+                    radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
+                )
 
-            URDFBoundary(
-                lid.part,
+            with URDFBoundary.from_shape(
+                dome_geom,
                 link_type=LinkType.LID,
-                shape=ShapeType.SPHERE,
+                shape=ShapeType.CANOPY,
                 type=BoundaryType.SOLID,
-                radius=dome_out_r * 0.001,
                 thickness=(dome_out_r - dome_in_r) * 0.001,
-                xyz=(0.0, tube_y * 0.001, 6.0 * 0.001),
-                rpy=(0.0, 0.0, 0.0),
-            )
-
-        RigidJoint("mount", lid.part, Location((0, 0, step_d)))
+            ):
+                pass
 
         return lid
 
@@ -995,9 +1012,9 @@ class CatFountainProvider(Provider):
 
             URDFMetadata(
                 label=target,
-                material="petg",
-                density=self.settings.petg_density,
-                boundary_friction=self.settings.petg_boundary_friction,
+                material=self.get_material(target) or "utr8100",
+                density=self.settings.density,
+                boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,
                 parent="bowl",
                 joint_type=URDFJointType.FIXED,
@@ -1013,18 +1030,33 @@ class CatFountainProvider(Provider):
     ) -> BuildPart:
         """Build the dry-side magnet drive hub mounted on the motor D-shaft."""
         hub_r = self.settings.impeller_radius + self.settings.magnet_radius + 1.6
-        hub_h = self.settings.magnet_thickness + self.settings.magnet_clearance + 1.5
+        hub_h = self.settings.magnet_thickness + self.settings.magnet_clearance + 0.8
+        standoff_h = self.settings.drive_hub_standoff_height
         mr = self.settings.magnet_radius + self.settings.magnet_clearance
         mt = self.settings.magnet_thickness + self.settings.magnet_clearance
         ring_r = self.settings.magnet_ring_radius
+        ring_inner_r = hub_r - 1.4
 
         with BuildPart() as hub:
             Cylinder(radius=hub_r, height=hub_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
 
-            # Round shaft hole (radius 0.78mm for 1.5mm motor shaft)
+            # Add integral outer perimeter standoff thrust ring on top face (Z = hub_h) for anti-wobble stability
+            if standoff_h > 0.0:
+                with Locations((0, 0, hub_h)):
+                    Cylinder(radius=hub_r, height=standoff_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
+                    Cylinder(
+                        radius=ring_inner_r,
+                        height=standoff_h + 0.1,
+                        align=(Align.CENTER, Align.CENTER, Align.MIN),
+                        mode=Mode.SUBTRACT,
+                    )
+
+            # Motor shaft hole with generous print-shrinkage clearance for smooth hand press-fit
+            shaft_r = self.settings.drive_hub_shaft_radius
+            total_h = hub_h + standoff_h
             with BuildSketch() as hole_sketch:
-                Circle(radius=0.78)
-            ext_hole = extrude(hole_sketch.sketch, amount=hub_h + 2.0, mode=Mode.PRIVATE)
+                Circle(radius=shaft_r)
+            ext_hole = extrude(hole_sketch.sketch, amount=total_h + 2.0, mode=Mode.PRIVATE)
             hub.part -= Location((0, 0, -1.0)) * ext_hole
 
             # Magnet pockets on the top face (Z = hub_h)
@@ -1039,7 +1071,7 @@ class CatFountainProvider(Provider):
 
             URDFMetadata(
                 label=target,
-                material=self.settings.material,
+                material=self.get_material(target) or "petg",
                 density=self.settings.density,
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,
@@ -1057,62 +1089,117 @@ class CatFountainProvider(Provider):
     def build_pump_cover(
         self, target: str, subassembly: str = "default", mode: ProviderMode = ProviderMode.DEFAULT
     ) -> BuildPart:
-        """Build the wet-side pump cover that snaps onto the volute casing."""
-        # Dynamically calculate cover radius based on impeller settings
+        """Build the revised wet-side pump cover that slides down the tube and mounts directly over the tube and casing."""
+        tube_x = 0.0
+        tube_y = 28.0
+        tube_r = self.settings.tube_radius
+        tube_clearance = self.settings.pump_cover_tube_clearance
         hub_r = self.settings.impeller_radius + self.settings.magnet_radius + 1.0
         impeller_r = hub_r + 4.0
         chamber_r = impeller_r + self.settings.pump_casing_clearance
+        pump_well_wall = self.settings.pump_well_wall
+        casing_r = chamber_r + pump_well_wall
         snap_r = chamber_r + 1.0
-        cover_r = snap_r - 0.15  # Fits with print clearance
-        cover_h = 1.5
-        inlet_r = self.settings.pump_inlet_radius
+        snap_clearance = self.settings.pump_cover_snap_clearance
+        internal_clearance = self.settings.pump_cover_internal_clearance
+        cover_r = snap_r - snap_clearance  # Fits into casing snap recess with epoxy resin clearance
+        cover_h = self.settings.pump_cover_height
+        sleeve_h = self.settings.pump_cover_sleeve_height
+        inlet_w = self.settings.pump_inlet_width
+        inlet_h = self.settings.pump_inlet_height
+        clip_opening_w = self.settings.pump_cover_clip_opening_width
+        lip_thickness = self.settings.pump_cover_lip_thickness
+        lip_in_r = cover_r - lip_thickness
 
         with BuildPart() as cover:
-            # Main disc body
-            Cylinder(radius=cover_r, height=cover_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
-            # Add downward-pointing intake snout (extends 4.0 mm downwards into the blade clearance gap)
-            with Locations((0, 0, -4.0)):
-                Cylinder(radius=inlet_r, height=4.0, align=(Align.CENTER, Align.CENTER, Align.MIN))
-            # Subtract central axial water intake hole through both disc and snout
-            with Locations((0, 0, -4.0)):
+            # 1. Main casing cap over impeller volute (Z = 0 at casing top rim)
+            with Locations((0, 0, 0)):
+                Cylinder(radius=casing_r, height=cover_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
+                # Downward lip entering casing snap recess (Z = -1.5 to 0) with tapered entry chamfer
+                with Locations((0, 0, -1.5)):
+                    Cone(
+                        bottom_radius=cover_r - 0.3,
+                        top_radius=cover_r,
+                        height=1.5,
+                        align=(Align.CENTER, Align.CENTER, Align.MIN),
+                    )
+
+            # 2. Tube sleeve sliding down the vertical delivery tube
+            with Locations((tube_x, tube_y, 0)):
+                Cylinder(radius=tube_r + 2.5, height=sleeve_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
+
+            # 3. Connecting bridge between casing cap and tube sleeve
+            with Locations((0, tube_y / 2.0, 0)):
+                Box(tube_r * 2.0 + 5.0, tube_y, cover_h, align=(Align.CENTER, Align.CENTER, Align.MIN))
+
+            # 4. Subtract vertical tube bore through sleeve with bottom entry lead-in cone
+            with Locations((tube_x, tube_y, -2.0)):
                 Cylinder(
-                    radius=inlet_r - 1.5,
-                    height=cover_h + 4.0 + 2.0,
+                    radius=tube_r + tube_clearance,
+                    height=sleeve_h + 4.0,
+                    align=(Align.CENTER, Align.CENTER, Align.MIN),
+                    mode=Mode.SUBTRACT,
+                )
+                with Locations((0, 0, 0)):
+                    Cone(
+                        bottom_radius=tube_r + tube_clearance + 0.6,
+                        top_radius=tube_r + tube_clearance,
+                        height=1.5,
+                        align=(Align.CENTER, Align.CENTER, Align.MIN),
+                        mode=Mode.SUBTRACT,
+                    )
+
+            # 5. Subtract North-facing C-clip snap opening through sleeve for easy tube installation
+            if clip_opening_w > 0.0:
+                with Locations((tube_x, tube_y, -2.0)):
+                    Box(
+                        clip_opening_w,
+                        20.0,
+                        sleeve_h + 4.0,
+                        align=(Align.CENTER, Align.MIN, Align.MIN),
+                        mode=Mode.SUBTRACT,
+                    )
+
+            # 6. Subtract internal impeller / guide post clearance cavity inside casing cap
+            with Locations((0, 0, -1.5)):
+                Cylinder(
+                    radius=lip_in_r,
+                    height=cover_h,
+                    align=(Align.CENTER, Align.CENTER, Align.MIN),
+                    mode=Mode.SUBTRACT,
+                )
+
+            # 7. Side water intake window on South face (opposite the tube: Y < 0)
+            with Locations((0, -casing_r + 2.0, 0.0)):
+                Box(
+                    inlet_w,
+                    10.0,
+                    inlet_h,
                     align=(Align.CENTER, Align.CENTER, Align.MIN),
                     mode=Mode.SUBTRACT,
                 )
 
             with URDFMetadata(
                 label=target,
-                material="petg",
-                density=self.settings.petg_density,
-                boundary_friction=self.settings.petg_boundary_friction,
+                material=self.get_material(target) or "utr8100",
+                density=self.settings.density,
+                boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.ANALYTICAL,
                 parent="bowl",
                 joint_type=URDFJointType.FIXED,
             ):
-                # Flat cover plate boundary (positioned at the mount joint Z_world = 49.5 mm)
-                URDFBoundary(
-                    cover,
+                with URDFBoundary.from_shape(
+                    cover.part,
                     link_type=LinkType.PUMP_COVER,
                     shape=ShapeType.CYLINDER,
                     type=BoundaryType.CAVITY,
-                    radius=cover_r * 0.001,
-                    height=0.0,
-                    thickness=cover_h * 0.001,
-                    xyz=(0.0, 0.0, 0.0),
-                    rpy=(math.pi, 0.0, 0.0),
-                    has_intake=True,
-                    intake_pos=(0.0, 0.0, 0.0),
-                    intake_normal=(0.0, 0.0, 1.0),
-                    intake_radius=inlet_r * 0.001,
-                    has_drain=False,
-                    has_tube=False,
-                    tube_pos=(0.0, 0.0, 0.0),
-                    tube_normal=(0.0, 0.0, 1.0),
-                    tube_radius=0.0,
+                    thickness=pump_well_wall * 0.001,
                     is_submerged=True,
-                )
+                ):
+                    IntakePort(
+                        location=Location((0.0, -casing_r, (inlet_h / 2.0)), (0, -90, 0)),
+                        radius=min(inlet_w, inlet_h) * 0.5 * 0.001,
+                    )
 
         RigidJoint("mount", cover.part, Location((0, 0, 0)))
         return cover
@@ -1169,15 +1256,19 @@ class CatFountainProvider(Provider):
         pump_cover_part.location = Location((0, 0, 110)) * pump_cover_part.location
         motor_clip_part.location = Location((0, -35, 0)) * motor_clip_part.location
 
-        # 4. Add the exploded parts to the room
-        room.add("bowl", bowl_part, color="grey", alpha=0.4)
-        room.add("impeller", impeller_part, color="red")
-        room.add("bottom_cover", bottom_cover_part, color="black")
-        room.add("lid", lid_part, color="green")
-        room.add("led_cover", led_cover, color="grey")
-        room.add("drive_hub", drive_hub_part, color="red")
-        room.add("pump_cover", pump_cover_part, color="grey", alpha=0.5)
-        room.add("motor_clip", motor_clip_part, color="yellow")
+        # 4. Add the exploded parts to the room using manifest colors
+        for name, part in [
+            ("bowl", bowl_part),
+            ("impeller", impeller_part),
+            ("bottom_cover", bottom_cover_part),
+            ("lid", lid_part),
+            ("led_cover", led_cover),
+            ("drive_hub", drive_hub_part),
+            ("pump_cover", pump_cover_part),
+            ("motor_clip", motor_clip_part),
+        ]:
+            rgba = self.get_color(name)
+            room.add(name, part, color=rgba[:3], alpha=rgba[3])
 
         # 5. Add connector lines indicating assembly paths
         impeller_conn = Line(
@@ -1267,95 +1358,19 @@ class CatFountainProvider(Provider):
         assert led_cover is not None
         bowl_part.joints["led_port"].connect_to(led_cover.joints["mount"])
 
-        # 3. Add the positioned parts directly to the room
-        if mode == ProviderMode.SIMULATE:
-            room.add("bowl", bowl_part, color="grey", alpha=0.4)
-            room.add("lid", lid_part, color="grey", alpha=0.4)
-            room.add("impeller", impeller_part, color="grey")
-            room.add("bottom_cover", bottom_cover_part, color="grey", alpha=0.4)
-            room.add("led_cover", led_cover, color="grey", alpha=0.4)
-            room.add("drive_hub", drive_hub_part, color="grey", alpha=0.4)
-            room.add("pump_cover", pump_cover_part, color="grey", alpha=0.4)
-            room.add("motor_clip", motor_clip_part, color="grey", alpha=0.4)
-        else:
-            room.add("bowl", bowl_part, color="grey", alpha=0.4)
-            room.add("lid", lid_part, color="green", alpha=0.6)
-            room.add("impeller", impeller_part, color="red")
-            room.add("bottom_cover", bottom_cover_part, color="black", alpha=0.6)
-            room.add("led_cover", led_cover, color="grey", alpha=0.4)
-            room.add("drive_hub", drive_hub_part, color="red")
-            room.add("pump_cover", pump_cover_part, color="grey", alpha=0.5)
-            room.add("motor_clip", motor_clip_part, color="yellow")
-
-        # 4. Build and add dummy PCBs for visualization and interference checking (non-printable)
-        if mode != ProviderMode.SIMULATE:
-
-            def make_motor() -> Part:
-                with BuildPart() as motor:
-                    # 1102 BLDC motor body (radius 6.9mm, height 9.3mm)
-                    Cylinder(radius=6.9, height=9.3, align=(Align.CENTER, Align.CENTER, Align.MAX))
-                    # 1.5mm shaft (radius 0.75mm, height 5.0mm)
-                    Cylinder(radius=0.75, height=5.0, align=(Align.CENTER, Align.CENTER, Align.MIN))
-                return cast(Part, motor.part)
-
-            motor_part = make_motor()
-            floor_z = self.settings.floor_z
-            motor_part.location = Location((0, 0, floor_z - 6.5))
-            room.add("motor", motor_part, color="grey", alpha=0.8)
-
-            def make_pcb(w: float, l: float, h: float = 2.0) -> Part:
-                with BuildPart() as pcb:
-                    Box(w, l, h, align=(Align.CENTER, Align.CENTER, Align.CENTER))
-                    fillet_r = min(1.5, min(w, l) / 2.0 - 0.1)
-                    if fillet_r > 0.1:
-                        fillet(pcb.edges().filter_by(Axis.Z), radius=fillet_r)
-                return cast(Part, pcb.part)
-
-            def make_sensor_pcb() -> Part:
-                with BuildPart() as pcb:
-                    Box(2.0, 25.0, 17.0, align=(Align.CENTER, Align.CENTER, Align.CENTER))
-                    fillet(pcb.edges().filter_by(Axis.X), radius=1.5)
-                return cast(Part, pcb.part)
-
-            floor_z = self.settings.floor_z
-            t = self.settings.bowl_thickness
-
-            # Load component footprints using Wiring class directly
-            yaml_path = Path(__file__).parent / "wiring.yaml"
-            wiring = Wiring(yaml_path, bowl_part)
-            pcb_footprints = wiring.footprints
-            for fp in pcb_footprints:
-                if fp.name in ("motor", "led"):
-                    continue
-                w, l, thickness = fp.dimensions
-                if fp.package == "tof_sensor":
-                    joint_name = fp.name.replace("sensor_", "sensor_port_")
-                    joint_loc = bowl_part.joints[joint_name].location
-                    s_pcb = make_sensor_pcb()
-                    s_pcb.location = joint_loc * Location((-18.3, 0, 0))
-                    room.add(f"sensor_pcb_{fp.name.split('_')[-1]}", s_pcb, color="green", alpha=0.6)
-
-                    # Model the emitter and receiver cones (25-degree Field of View)
-                    def make_cone() -> Part:
-                        h = 40.0
-                        r1 = 0.5
-                        r2 = r1 + h * math.tan(math.radians(12.5))
-                        with BuildPart() as cone:
-                            Cone(r1, r2, h, align=(Align.CENTER, Align.CENTER, Align.MIN))
-                        return cast(Part, cone.part)
-
-                    e_cone = make_cone()
-                    e_cone.location = joint_loc * Location((-18.3, 0, 0)) * Location((2.0, -0.8, 0)) * Rot(0, 90, 0)
-                    room.add(f"sensor_emitter_{fp.name.split('_')[-1]}", e_cone, color="red", alpha=0.3)
-
-                    r_cone = make_cone()
-                    r_cone.location = joint_loc * Location((-18.3, 0, 0)) * Location((2.0, 0.8, 0)) * Rot(0, 90, 0)
-                    room.add(f"sensor_receiver_{fp.name.split('_')[-1]}", r_cone, color="blue", alpha=0.3)
-                else:
-                    pcb = make_pcb(w, l, thickness)
-                    pcb.location = Location(fp.position, fp.rotation)
-                    room.add(f"{fp.name}_pcb", pcb, color="green", alpha=0.6)
-
+        # 3. Add the positioned parts directly to the room using manifest colors
+        for name, part in [
+            ("bowl", bowl_part),
+            ("lid", lid_part),
+            ("impeller", impeller_part),
+            ("bottom_cover", bottom_cover_part),
+            ("led_cover", led_cover),
+            ("drive_hub", drive_hub_part),
+            ("pump_cover", pump_cover_part),
+            ("motor_clip", motor_clip_part),
+        ]:
+            rgba = self.get_color(name)
+            room.add(name, part, color=rgba[:3], alpha=rgba[3])
         self.room = room
 
     def get_simulate_hooks_impl(self, sim_name: str) -> dict[Simulate, Callable[..., Any]]:
@@ -1406,7 +1421,7 @@ class CatFountainProvider(Provider):
 
             URDFMetadata(
                 label=target,
-                material="petg",
+                material=self.get_material(target) or "petg",
                 density=self.settings.petg_density,
                 boundary_friction=self.settings.petg_boundary_friction,
                 collision_type=URDFCollisionType.CONVEX,

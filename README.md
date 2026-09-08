@@ -107,6 +107,48 @@ python src/view.py cat_fountain/product:view/simulate --no-build
 python src/view.py cat_fountain/product:view/simulate --save-rrd output.rrd
 ```
 
+### Photorealistic Product Turntables & Animation Export
+
+Interactive visualization and photorealistic MP4 video rendering are powered by [`src/view.py`](file:///Users/daparker/gh/hardware/src/view.py) and the headless Blender rendering backend.
+
+#### Product Turntable MP4 Export
+Render a 360-degree beauty turntable video with 6500K daylight studio lighting, physically accurate PBR materials (matte resin, engineering thermoplastics), and ground shadows:
+
+```bash
+# Render 2.5K 60 FPS turntable video (H.264 MP4)
+python src/view.py cat_fountain/product:view \
+    --save-mp4 recordings/product_turntable.mp4 \
+    --fps 60 \
+    --resolution 2560x1440 \
+    --samples 32 \
+    --no-gui
+```
+
+#### Dynamic Simulation Animation Export
+Render high-fidelity video animations of physical simulations with dynamic fluid bodies (laminar sheets, waterfalls, splash clusters) and articulated rotating impellers:
+
+```bash
+# Render 1080p 30 FPS dynamic simulation animation (60 seconds / 1,800 steps)
+python src/view.py cat_fountain/product:view/simulate \
+    --save-mp4 recordings/product_turntable_sim.mp4 \
+    --sim-steps 1800 \
+    --fps 30 \
+    --resolution 1920x1080 \
+    --samples 16 \
+    --no-gui
+```
+
+#### Remote Cloud Execution (`anvil`)
+For high-resolution renders and long simulations, offload execution to the `anvil` cloud server to free up local CPU/GPU compute:
+
+```bash
+# Render turntable remotely on Anvil
+bin/anvil run "PYTHONPATH=src python src/view.py cat_fountain/product:view --save-mp4 recordings/product_turntable.mp4 --fps 60 --no-gui --resolution 2560x1440 --samples 32 --no-daemon"
+
+# Download the rendered video to your local workspace
+bin/anvil pull recordings/product_turntable.mp4
+```
+
 ### Wiring Diagrams
 
 This project includes a declarative wiring and footprint routing engine to generate 2D system-level wiring diagrams:
