@@ -321,7 +321,7 @@ def compute_surface_normal(
     """Compute outward-pointing unit surface normal vector for canonical shapes at local coordinates.
 
     Args:
-        shape_type: ShapeType integer code (e.g. CYLINDER, TUBE, SPHERE, CASING, BOX, PLANE).
+        shape_type: ShapeType integer code (e.g. CYLINDER, TUBE, CANOPY, CASING, BOX, PLANE).
         pos_local: 3D coordinates in local boundary frame, shape (..., 3).
         radius: Radius parameter of the geometric shape in meters.
         height: Height parameter of the geometric shape in meters.
@@ -351,16 +351,16 @@ def compute_surface_normal(
         jnp.where(is_bot[..., None], bot_cap_norm, radial_norm),
     )
 
-    # Sphere normal: radial from origin
+    # Canopy normal: radial from origin
     r_3d = jnp.sqrt(x**2 + y**2 + z**2 + 1e-12)
-    sphere_norm = jnp.stack([x / r_3d, y / r_3d, z / r_3d], axis=-1)
+    canopy_norm = jnp.stack([x / r_3d, y / r_3d, z / r_3d], axis=-1)
 
     # Default / Plane / Box (normal along Z)
     default_norm = jnp.array([0.0, 0.0, 1.0])
 
     return jnp.where(
-        shape_type == 1,  # SPHERE
-        sphere_norm,
+        shape_type == 1,  # CANOPY
+        canopy_norm,
         jnp.where(
             (shape_type == 0) | (shape_type == 2) | (shape_type == 6),  # CYLINDER, TUBE, CASING
             cylinder_norm,

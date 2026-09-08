@@ -73,7 +73,7 @@ def reconstruct_boundary_cad_solid(b: Any, parent_location: Optional[b3d.Locatio
                 case _:
                     return None
 
-        case ShapeType.SPHERE:
+        case ShapeType.CANOPY:
             with b3d.BuildPart() as p:
                 b3d.Sphere(radius=r_out)
                 if r_in > 0.0:
@@ -189,7 +189,7 @@ def reconstruct_boundary_cad_cavity(b: Any, parent_location: Optional[b3d.Locati
                 b3d.Cylinder(radius=r_in, height=h, align=(b3d.Align.CENTER, b3d.Align.CENTER, b3d.Align.MIN))
             return p.part.located(loc)
 
-        case ShapeType.SPHERE:
+        case ShapeType.CANOPY:
             if r_in <= 0.0:
                 return None
             with b3d.BuildPart() as p:
@@ -342,7 +342,7 @@ def extract_boundary_from_cad(
     # 4. Infer shape type if not explicitly provided
     if shape is None:
         if len(sph_faces) > 0 and len(cyl_faces) == 0:
-            shape = ShapeType.SPHERE
+            shape = ShapeType.CANOPY
         elif len(cyl_faces) > 0:
             shape = ShapeType.CYLINDER
         elif abs(dx - dy) < 1e-3 and max(dx, dy) > 0.0:
@@ -378,7 +378,7 @@ def extract_boundary_from_cad(
                 default_height = float(dz * 0.001)
                 default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(bbox.min.Z * 0.001))
 
-        case ShapeType.SPHERE:
+        case ShapeType.CANOPY:
             sph_radii = [float(f.radius) * 0.001 for f in sph_faces if hasattr(f, "radius") and f.radius is not None]
             if sph_radii:
                 sph_radii.sort()

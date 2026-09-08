@@ -54,9 +54,9 @@ def test_compute_surface_normal():
     norm_side = compute_surface_normal(int(ShapeCode.CYLINDER), pos_side, radius=0.030, height=0.050)
     assert np.allclose(norm_side, np.array([1.0, 0.0, 0.0]), atol=1e-3)
 
-    # Sphere normal
+    # Canopy normal
     pos_sph = jnp.array([0.0, 0.050, 0.0])
-    norm_sph = compute_surface_normal(int(ShapeCode.SPHERE), pos_sph, radius=0.050, height=0.0)
+    norm_sph = compute_surface_normal(int(ShapeCode.CANOPY), pos_sph, radius=0.050, height=0.0)
     assert np.allclose(norm_sph, np.array([0.0, 1.0, 0.0]), atol=1e-3)
 
 

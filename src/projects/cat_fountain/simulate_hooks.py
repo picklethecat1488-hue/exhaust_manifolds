@@ -57,7 +57,7 @@ def compute_flow_metrics(provider: Any, step_idx: Optional[int] = None) -> dict[
     in_tube_cnt = int(np.sum(in_tube_mask))
 
     # 2. Flow emerging at spout dome
-    at_spout_mask = (dist_tube <= tube_r_outer + 0.010) & (zs >= tube_top_z - 0.002) & (zs <= tube_top_z + 0.012)
+    at_spout_mask = (dist_tube <= tube_r_outer + 0.015) & (zs >= tube_top_z - 0.005) & (zs <= tube_top_z + 0.015)
     at_spout_cnt = int(np.sum(at_spout_mask))
 
     # 3. Flow on lid drinking shelf / tray (outside tube bore, inside lid rim, on top surface)

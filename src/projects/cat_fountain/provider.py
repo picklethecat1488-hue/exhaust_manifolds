@@ -986,7 +986,7 @@ class CatFountainProvider(Provider):
             with URDFBoundary.from_shape(
                 dome_geom,
                 link_type=LinkType.LID,
-                shape=ShapeType.SPHERE,
+                shape=ShapeType.CANOPY,
                 type=BoundaryType.SOLID,
                 thickness=(dome_out_r - dome_in_r) * 0.001,
             ):

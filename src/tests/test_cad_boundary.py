@@ -78,9 +78,9 @@ def test_extract_boundary_from_sphere():
             b3d.Sphere(radius=sph_r_mm)
 
     sph_solid = p.part
-    params = extract_boundary_from_cad(sph_solid, shape=ShapeType.SPHERE, type=BoundaryType.SOLID)
+    params = extract_boundary_from_cad(sph_solid, shape=ShapeType.CANOPY, type=BoundaryType.SOLID)
 
-    assert params["shape"] == ShapeType.SPHERE
+    assert params["shape"] == ShapeType.CANOPY
     assert math.isclose(params["radius"], sph_r_mm * 0.001, abs_tol=1e-5)
     assert math.isclose(params["xyz"][0], center_pos[0] * 0.001, abs_tol=1e-5)
     assert math.isclose(params["xyz"][1], center_pos[1] * 0.001, abs_tol=1e-5)

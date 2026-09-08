@@ -304,7 +304,7 @@ SHAPE_BOX = 2
 SHAPE_PLANE = 3
 SHAPE_IMPELLER = 4
 SHAPE_TUBE = 5
-SHAPE_SPHERE = 6
+SHAPE_CANOPY = 6
 SHAPE_CASING = 7
 
 # Integer identifiers for BoundaryType
@@ -845,15 +845,15 @@ def _make_grid_masks(
         is_plane = shape == SHAPE_PLANE
         is_solid_plane = _grid_mask_plane_jax(zb_loc, thickness)
 
-        # SPHERE
-        is_sphere = shape == SHAPE_SPHERE
-        is_solid_sphere = _grid_mask_sphere_jax(xb_loc**2 + yb_loc**2 + zb_loc**2, radius)
+        # CANOPY
+        is_canopy = shape == SHAPE_CANOPY
+        is_solid_canopy = _grid_mask_sphere_jax(xb_loc**2 + yb_loc**2 + zb_loc**2, radius)
 
         is_solid = jnp.where(is_cyl, is_solid_cyl, jnp.zeros(flat_shape, dtype=jnp.bool_))
         is_solid = jnp.where(is_tube, is_solid_tube, is_solid)
         is_solid = jnp.where(is_casing, is_solid_casing, is_solid)
         is_solid = jnp.where(is_plane, is_solid_plane, is_solid)
-        is_solid = jnp.where(is_sphere, is_solid_sphere, is_solid)
+        is_solid = jnp.where(is_canopy, is_solid_canopy, is_solid)
 
         # Analytical normal vectors for each shape type
         thick = jnp.maximum(thickness, dx)
@@ -909,7 +909,7 @@ def _make_grid_masks(
         norm_base_i = jnp.where(is_tube, tube_norm_base, norm_base_i)
         norm_base_i = jnp.where(is_casing, casing_norm_base, norm_base_i)
         norm_base_i = jnp.where(is_plane, plane_norm_base, norm_base_i)
-        norm_base_i = jnp.where(is_sphere, sphere_norm_base, norm_base_i)
+        norm_base_i = jnp.where(is_canopy, sphere_norm_base, norm_base_i)
 
         normal_grid_flat = jnp.where(is_solid[:, None] & (~is_imp), norm_base_i, normal_grid_flat)
 
@@ -2280,14 +2280,14 @@ def _apply_boundary_ccd_subroutine(
         pos_next = jnp.where(is_pl, pos_pl, pos_next)
         vel_next = jnp.where(is_pl, vel_pl, vel_next)
 
-        # 2. Spherical obstacles (such as the spout deflection dome)
-        is_sph = (shape_k == SHAPE_SPHERE) & (b_types[k] == 0)
-        sph_t = b_params[k, BoundaryParam.THICKNESS]
-        pos_sph, vel_sph = _ccd_sphere_obstacle_boundary(
-            pos_curr, pos_next, vel_next, b_params[k, BoundaryParam.R_OUTER], b_pos_arr[k], sph_t
+        # 2. Spherical obstacles / canopy (such as the spout deflection dome)
+        is_canopy = (shape_k == SHAPE_CANOPY) & (b_types[k] == 0)
+        canopy_t = b_params[k, BoundaryParam.THICKNESS]
+        pos_canopy, vel_canopy = _ccd_sphere_obstacle_boundary(
+            pos_curr, pos_next, vel_next, b_params[k, BoundaryParam.R_OUTER], b_pos_arr[k], canopy_t
         )
-        pos_next = jnp.where(is_sph, pos_sph, pos_next)
-        vel_next = jnp.where(is_sph, vel_sph, vel_next)
+        pos_next = jnp.where(is_canopy, pos_canopy, pos_next)
+        vel_next = jnp.where(is_canopy, vel_canopy, vel_next)
 
         # 3. Solid lid tray drinking shelf (cylinder with drainage hole and tube hole, exposed to air)
         is_submerged_k = b_params[k, BoundaryParam.IS_SUBMERGED] > 0.5
@@ -2459,12 +2459,11 @@ def _integrate_particles_subroutine(
     in_tube = jnp.where(has_tube, in_tube, jnp.zeros(pos_curr.shape[0], dtype=jnp.bool_))
 
     max_ceiling_z = jnp.where(base_idx != -1, b_params[base_idx, BoundaryParam.MAX_CEILING_Z], base_height)
-    influence_h = jnp.minimum(tube_h + 0.049, max_ceiling_z)
 
     outside_base_raw = (
         (r_local > base_radius)
         | (pos_local_check[:, 2] < cavity_floor_z)
-        | (pos_local_check[:, 2] > max_ceiling_z + 0.005)
+        | (pos_local_check[:, 2] > max_ceiling_z + 0.015)
     ) & (~in_tube)
     outside_base = jnp.where(base_idx != -1, outside_base_raw, jnp.zeros(pos_curr.shape[0], dtype=jnp.bool_))
 
@@ -3671,7 +3670,7 @@ class Fluid:
 
             if shape_type == p.GEOM_SPHERE:
                 b_cfg = BoundaryConfig(
-                    shape=ShapeType.SPHERE,
+                    shape=ShapeType.CANOPY,
                     type=BoundaryType.SOLID,
                     radius=radius,
                     xyz=b_pos,
