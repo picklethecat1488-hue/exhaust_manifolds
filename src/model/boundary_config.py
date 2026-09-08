@@ -31,7 +31,7 @@ class ShapeType(StrEnum):
     PLANE = "plane"
     IMPELLER = "impeller"
     TUBE = "tube"
-    SPHERE = "sphere"
+    CANOPY = "canopy"
     CASING = "casing"
 
 
@@ -39,7 +39,7 @@ class ShapeCode(IntEnum):
     """Integer codes for shapes used in JAX tensor solvers."""
 
     CYLINDER = 0
-    SPHERE = 1
+    CANOPY = 1
     TUBE = 2
     IMPELLER = 3
     BOX = 4
@@ -305,7 +305,7 @@ class BoundaryConfig(BaseModel):
             "intake_hole_z",
             "pool_max_z",
         },
-        ShapeType.SPHERE: {
+        ShapeType.CANOPY: {
             "radius",
             "thickness",
         },

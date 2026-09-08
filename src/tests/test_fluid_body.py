@@ -1209,3 +1209,82 @@ def test_generate_droplet_mesh():
     z_span = np.max(v_rest[:, 2]) - np.min(v_rest[:, 2])
     xy_span = np.max(v_rest[:, 0]) - np.min(v_rest[:, 0])
     assert z_span < xy_span, f"Resting droplet not oblate/flattened (z_span={z_span}, xy_span={xy_span})"
+
+
+def test_top_sheet_and_terrace_water_mesh_elevation_and_continuity():
+    """Verify that top sheet and lid shelf fluid bodies maintain continuous physical elevation above solid plastic."""
+    import trimesh
+
+    z_lid = 0.1050  # Lid pocket shelf floor
+    terrace_z = 0.10875  # Raised drinking platform top surface (3.75mm above shelf)
+    terrace_r = 0.030
+    terrace_y = 0.028
+    pocket_r = 0.080
+    r_s = 0.0025
+
+    ctx = FluidCADContext(
+        features=(
+            CADFeature(CADFeatureType.TUBE, x=0.0, y=terrace_y, z=terrace_z, r=0.005),
+            CADFeature(CADFeatureType.TERRACE, x=0.0, y=terrace_y, z=terrace_z, r=terrace_r),
+            CADFeature(CADFeatureType.POCKET, x=0.0, y=0.0, z=z_lid, r=pocket_r),
+            CADFeature(CADFeatureType.BOWL, x=0.0, y=0.0, z=0.041, r=0.090),
+        )
+    )
+
+    tracker = FluidBodyTracker(r_s=r_s)
+
+    # Frame 1: Fluid spreading on terrace platform (1 particle on platform)
+    pos_f1 = np.array(
+        [
+            [0.005, terrace_y + 0.005, terrace_z + 0.001],
+        ],
+        dtype=np.float32,
+    )
+    vel_f1 = np.zeros_like(pos_f1)
+
+    bodies_f1 = tracker.update_bodies(pos_f1, vel_f1, cad_context=ctx)
+    top_sheet_f1 = [b for b in bodies_f1 if b.stage == FluidStage.TOP_SHEET]
+    assert len(top_sheet_f1) == 1, "TOP_SHEET should be active with 1 particle on terrace"
+
+    # Verify top sheet mesh elevation
+    verts_sheet, faces_sheet = top_sheet_f1[0].to_mesh()
+    assert len(verts_sheet) > 0 and len(faces_sheet) > 0
+    mesh_sheet = trimesh.Trimesh(vertices=verts_sheet, faces=faces_sheet)
+    assert mesh_sheet.is_watertight
+    assert mesh_sheet.volume > 0.0
+
+    # Mesh floor must align with terrace top surface, and top surface must be proudly visible above plastic
+    assert np.min(verts_sheet[:, 2]) >= terrace_z - 1e-4, "Water sheet bottom must rest on terrace top surface"
+    assert np.max(verts_sheet[:, 2]) >= terrace_z + 0.0015, "Water sheet top surface must be visible above plastic"
+
+    # Frame 2: Top sheet spilling over lip into shelf pool
+    pos_f2 = np.array(
+        [
+            [0.005, terrace_y + 0.005, terrace_z + 0.001],  # Top sheet
+            [0.000, terrace_y + terrace_r + 0.002, (terrace_z + z_lid) / 2.0 - 0.001],  # Lip waterfall
+            [0.050, 0.010, z_lid + 0.002],  # Lid shelf pool
+        ],
+        dtype=np.float32,
+    )
+    vel_f2 = np.zeros_like(pos_f2)
+
+    bodies_f2 = tracker.update_bodies(pos_f2, vel_f2, cad_context=ctx)
+    top_sheet_f2 = [b for b in bodies_f2 if b.stage == FluidStage.TOP_SHEET]
+    lip_wf_f2 = [b for b in bodies_f2 if b.stage == FluidStage.LIP_WATERFALL]
+    lid_pool_f2 = [b for b in bodies_f2 if b.stage == FluidStage.LID_POOL]
+
+    assert len(top_sheet_f2) == 1
+    assert len(lip_wf_f2) == 1
+    assert len(lid_pool_f2) == 1
+
+    # Verify Lip Waterfall mesh connectivity (spans from terrace top down to lid shelf)
+    verts_wf, faces_wf = lip_wf_f2[0].to_mesh()
+    assert len(verts_wf) > 0 and len(faces_wf) > 0
+    assert np.max(verts_wf[:, 2]) >= terrace_z - 1e-4
+    assert np.min(verts_wf[:, 2]) <= z_lid + 1e-4
+
+    # Verify Lid Pool mesh
+    verts_pool, faces_pool = lid_pool_f2[0].to_mesh()
+    assert len(verts_pool) > 0 and len(faces_pool) > 0
+    assert np.min(verts_pool[:, 2]) >= z_lid - 1e-4
+    assert np.max(verts_pool[:, 2]) >= z_lid + 0.002

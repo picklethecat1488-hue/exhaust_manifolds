@@ -834,8 +834,9 @@ class TestCatFountainProvider:
                             assert res.solid_conformance_ratio >= 0.70, (
                                 f"Part {part_name} impeller boundary has low conformance ({res.solid_conformance_ratio:.2%})"
                             )
-                        case ShapeType.SPHERE:
-                            assert res.solid_conformance_ratio >= 0.70, (
+                        case ShapeType.CANOPY:
+                            # Hemispherical dome canopy with radial grating discharge slots
+                            assert res.solid_conformance_ratio >= 0.40, (
                                 f"Part {part_name} dome boundary has low conformance ({res.solid_conformance_ratio:.2%})"
                             )
                         case _:
@@ -1240,7 +1241,7 @@ class TestCatFountainProvider:
                 p.disconnect(physics_client)
 
     @pytest.mark.slow
-    @pytest.mark.timeout(300)
+    @pytest.mark.timeout(600)
     def test_flow_and_drainage_metrics_stability_integration(self):
         """Verify continuous stability of flow, spout discharge, waterfall, drainage, and pool metrics."""
         import tempfile
@@ -1310,11 +1311,11 @@ class TestCatFountainProvider:
                 assert fluid is not None
 
                 # Execute simulation steps through production hooks
-                for step_idx in range(120):
+                for step_idx in range(240):
                     step_fn(body_id, physics_client, step_idx, "product:view/simulate")
                     p.stepSimulation(physicsClientId=physics_client)
 
-                assert hasattr(provider, "metrics_history") and len(provider.metrics_history) == 120
+                assert hasattr(provider, "metrics_history") and len(provider.metrics_history) == 240
 
                 # Derive physical expectations from first principles:
                 # 1. Total active fluid particles and single particle volume
@@ -1336,7 +1337,7 @@ class TestCatFountainProvider:
                 # 4. Continuous Delivery Tube Flow & Spout Discharge with naturalistic lower and upper bounds:
                 # - Lower bounds ensure pump delivery column does not collapse to zero after priming
                 # - Upper bounds ensure fluid packing remains physically bounded by geometric volume
-                steady_tube = np.array([m["flow_tube"] for m in provider.metrics_history[100:]])
+                steady_tube = np.array([m["flow_tube"] for m in provider.metrics_history[150:]])
                 all_spout = np.array([m["flow_spout"] for m in provider.metrics_history])
 
                 min_tube_particles = 1
@@ -1382,9 +1383,11 @@ class TestCatFountainProvider:
                 )
 
                 # 7. Reservoir Water Depth & Casing Contact Continuity
+                min_pool_depth = provider.settings.slot_height * 0.001
+                max_pool_depth = (provider.settings.bowl_height - provider.settings.floor_z) * 0.001
                 steady_depth = np.array([m["water_depth"] for m in provider.metrics_history[40:]])
-                assert np.all(steady_depth >= 0.010), "Reservoir water depth drained below minimum threshold"
-                assert np.all(steady_depth <= 0.080), "Reservoir water depth exceeded maximum bowl capacity"
+                assert np.all(steady_depth >= min_pool_depth), "Reservoir water depth drained below minimum threshold"
+                assert np.all(steady_depth <= max_pool_depth), "Reservoir water depth exceeded maximum bowl capacity"
 
                 # Verify continuous physical fluid contact with motor casing and non-piled reservoir distribution
                 pos_np = np.asarray(fluid.pos_jax)
@@ -1395,25 +1398,34 @@ class TestCatFountainProvider:
                 in_bowl = (pos_act[:, 2] >= bowl_floor_z - 0.005) & (pos_act[:, 2] <= lid_z)
                 pos_bowl = pos_act[in_bowl]
 
-                casing_x, casing_y = 0.0, -0.028
-                casing_r = 0.025
-                d_casing = np.sqrt((pos_bowl[:, 0] - casing_x) ** 2 + (pos_bowl[:, 1] - casing_y) ** 2)
+                casing_r = (
+                    provider.settings.impeller_radius
+                    + provider.settings.pump_casing_clearance
+                    + provider.settings.pump_well_wall
+                ) * 0.001
+                d_casing = np.sqrt(pos_bowl[:, 0] ** 2 + pos_bowl[:, 1] ** 2)
                 r_bowl = np.sqrt(pos_bowl[:, 0] ** 2 + pos_bowl[:, 1] ** 2)
 
                 assert np.min(d_casing) <= casing_r + 0.003, (
                     f"Water detached from motor casing: min_d_casing={np.min(d_casing):.4f} m"
                 )
-                assert np.sum(d_casing <= casing_r + 0.005) >= 1000, (
+                v_casing_shell = math.pi * ((casing_r + 0.005) ** 2 - casing_r**2) * min_pool_depth
+                min_casing_contact_particles = max(100, int(0.50 * (v_casing_shell / v_particle)))
+                assert np.sum(d_casing <= casing_r + 0.005) >= min_casing_contact_particles, (
                     "Insufficient fluid volume in contact with motor casing"
                 )
-                assert np.sum(r_bowl >= 0.080) <= int(0.60 * len(pos_bowl)), (
+                bowl_inner_r = (provider.settings.bowl_radius - provider.settings.bowl_thickness) * 0.001
+                assert np.sum(r_bowl >= bowl_inner_r * 0.833) <= int(0.60 * len(pos_bowl)), (
                     "Excessive fluid mass piled up at outer bowl wall"
                 )
 
                 # Verify standalone compute_flow_metrics hook method
                 current_metrics = provider.compute_flow_metrics()
                 assert min_expected_pool_particles <= current_metrics["pool_volume"] <= max_expected_pool_particles
-                assert "water_depth" in current_metrics and 0.010 <= current_metrics["water_depth"] <= 0.080
+                assert (
+                    "water_depth" in current_metrics
+                    and min_pool_depth <= current_metrics["water_depth"] <= max_pool_depth
+                )
             finally:
                 p.disconnect(physics_client)
 

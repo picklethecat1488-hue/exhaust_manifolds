@@ -29,6 +29,13 @@ from provider import (
     URDFBoundaryType,
     URDFJointType,
     URDFMotorType,
+    IntakePort,
+    DrainPort,
+    TubePort,
+    FlowSlot,
+    SpoutDeflection,
+    ImpellerVanes,
+    MagneticCoupling,
     LinkType,
     WiringDiagram,
 )
@@ -542,16 +549,15 @@ class CatFountainProvider(Provider):
                 boundary_friction=self.settings.boundary_friction,
                 collision_type=URDFCollisionType.ANALYTICAL,
             ):
-                URDFBoundary(
+                with URDFBoundary.from_shape(
                     reservoir_shape,
                     link_type=LinkType.BASE,
+                    shape=ShapeType.CYLINDER,
                     type=BoundaryType.CAVITY,
-                    height=(h - floor_z + self.settings.spout_length) * 0.001,
-                    thickness=0.0035,
-                    has_tube=True,
-                    tube_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                    shelf_depth=self.settings.lid_pocket_cavity_height * 0.001,
-                )
+                    thickness=t * 0.001,
+                ):
+                    TubePort(location=Location((0.0, tube_y, 0.0)), radius=tube_in_r * 0.001)
+
                 with Locations((0.0, 28.0, floor_z)):
                     tube_geom = Cylinder(
                         radius=self.settings.tube_radius,
@@ -559,29 +565,24 @@ class CatFountainProvider(Provider):
                         align=(Align.CENTER, Align.CENTER, Align.MIN),
                         mode=Mode.PRIVATE,
                     )
-                URDFBoundary(
+                with URDFBoundary.from_shape(
                     tube_geom,
                     link_type=LinkType.TUBE,
                     shape=ShapeType.TUBE,
                     type=BoundaryType.SOLID_CAVITY,
-                    radius=self.settings.tube_radius * 0.001,
                     thickness=self.settings.tube_thickness * 0.001,
-                    height=self.settings.tube_height * 0.001,
-                    slot_height=9.0 * 0.001,
-                    slot_width=8.0 * 0.001,
-                    spout_radius=(self.settings.spout_deflection_radius + 1.0) * 0.001,
-                    spout_height=(self.settings.spout_deflection_thickness + 9.0) * 0.001,
-                    has_intake=True,
-                    intake_pos=(0.0, 0.0, 0.0),
-                    intake_normal=(0.0, -1.0, 0.0),
-                    intake_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                    has_drain=True,
-                    drain_pos=(0.0, 0.0, self.settings.tube_height * 0.001),
-                    drain_normal=(0.0, 0.0, 1.0),
-                    drain_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                    xyz=(0.0, 28.0 * 0.001, floor_z * 0.001),
-                    rpy=(0.0, 0.0, 0.0),
-                )
+                ):
+                    IntakePort(location=Location((0.0, 0.0, 0.0), (0, -90, 0)), radius=tube_in_r * 0.001)
+                    DrainPort(
+                        location=Location((0.0, 0.0, self.settings.tube_height), (0, 0, 0)),
+                        radius=tube_in_r * 0.001,
+                    )
+                    FlowSlot(height=9.0 * 0.001, width=8.0 * 0.001)
+                    SpoutDeflection(
+                        radius=(self.settings.spout_deflection_radius + 1.0) * 0.001,
+                        height=(self.settings.spout_deflection_thickness + 9.0) * 0.001,
+                    )
+
                 casing_thick = (casing_r - chamber_r) * 0.001
                 with Locations((0.0, 0.0, floor_z)):
                     casing_geom = Cylinder(
@@ -590,31 +591,21 @@ class CatFountainProvider(Provider):
                         align=(Align.CENTER, Align.CENTER, Align.MIN),
                         mode=Mode.PRIVATE,
                     )
-                URDFBoundary(
+                with URDFBoundary.from_shape(
                     casing_geom,
                     link_type=LinkType.CASING,
                     shape=ShapeType.CASING,
                     type=BoundaryType.SOLID_CAVITY,
-                    radius=casing_r * 0.001,
                     thickness=casing_thick,
-                    height=10.0 * 0.001,
-                    slot_height=9.0 * 0.001,  # Slot opening from Z = 0 to 9mm
-                    slot_width=8.0 * 0.001,
-                    tube_pos=(0.0, 28.0 * 0.001, 0.0),
-                    cutoff_y=0.0,
-                    ceiling_thickness=0.0,
-                    has_intake=True,
-                    intake_pos=(0.0, -casing_r * 0.001, (self.settings.pump_inlet_height / 2.0 - 1.5) * 0.001),
-                    intake_normal=(0.0, -1.0, 0.0),
-                    intake_radius=min(self.settings.pump_inlet_width, self.settings.pump_inlet_height) * 0.5 * 0.001,
-                    has_drain=True,
-                    drain_pos=(0.0, 28.0 * 0.001, 0.0),
-                    drain_normal=(0.0, 1.0, 0.0),
-                    drain_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
                     is_submerged=True,
-                    xyz=(0.0, 0.0, floor_z * 0.001),
-                    rpy=(0.0, 0.0, 0.0),
-                )
+                ):
+                    IntakePort(
+                        location=Location((0.0, -casing_r, (self.settings.pump_inlet_height / 2.0 - 1.5)), (0, -90, 0)),
+                        radius=min(self.settings.pump_inlet_width, self.settings.pump_inlet_height) * 0.5 * 0.001,
+                    )
+                    DrainPort(location=Location((0.0, 28.0, 0.0), (0, 90, 0)), radius=tube_in_r * 0.001)
+                    TubePort(location=Location((0.0, 28.0, 0.0), (0, 0, 0)))
+                    FlowSlot(height=9.0 * 0.001, width=8.0 * 0.001)
 
         # Define joints
         motor_shaft_z = floor_z - 17.5 + self.settings.motor_clip_thickness + 9.3
@@ -717,23 +708,22 @@ class CatFountainProvider(Provider):
                 magnet_count=self.settings.magnet_count,
                 impeller_shaft_radius=self.settings.impeller_shaft_radius,
             ):
-                URDFBoundary(
-                    impeller,
+                with URDFBoundary.from_shape(
+                    impeller.part,
                     link_type=LinkType.IMPELLER,
                     shape=ShapeType.IMPELLER,
                     type=BoundaryType.SOLID,
                     radius=impeller_r * 0.001,
-                    height=cast(URDFShape, impeller.part).urdf_height,
                     thickness=pin_r * 0.001,
-                    vane_twist=self.settings.vane_twist,
-                    vane_thickness=1.2 * 0.001,
-                    num_vanes=num_blades,
-                    magnet_radius=self.settings.magnet_radius,
-                    magnet_thickness=self.settings.magnet_thickness,
-                    pump_well_wall=self.settings.pump_well_wall,
-                    magnet_count=self.settings.magnet_count,
-                    impeller_shaft_radius=self.settings.impeller_shaft_radius,
-                )
+                ):
+                    ImpellerVanes(count=num_blades, twist=self.settings.vane_twist, thickness=1.2 * 0.001)
+                    MagneticCoupling(
+                        radius=self.settings.magnet_radius,
+                        thickness=self.settings.magnet_thickness,
+                        count=self.settings.magnet_count,
+                        well_wall=self.settings.pump_well_wall,
+                        shaft_radius=self.settings.impeller_shaft_radius,
+                    )
 
         RevoluteJoint(label="pin", to_part=impeller.part, axis=Axis((0, 0, 0), (0, 0, 1)), angular_range=(0, 360))
 
@@ -951,6 +941,24 @@ class CatFountainProvider(Provider):
                         mode=Mode.SUBTRACT,
                     )
 
+        # Define joints and fluid ports
+        intake_z = self.settings.lid_pocket_thickness - 0.25
+        RigidJoint("intake_port", lid.part, Location((0.0, tube_y, intake_z), (0, 180, 0)))
+        RigidJoint("drain_port", lid.part, Location((0.0, cutout_y, 0.0), (0, 0, 0)))
+        RigidJoint("tube_port", lid.part, Location((0.0, tube_y, intake_z), (0, 0, 0)))
+        RigidJoint("mount", lid.part, Location((0, 0, step_d)))
+
+        # Define CAD feature geometry primitives for analytical boundaries
+        with Locations((0, 0, self.settings.lid_pocket_z_offset)):
+            pocket_geom = Cylinder(
+                radius=self.settings.lid_pocket_radius,
+                height=self.settings.lid_pocket_cavity_height,
+                align=(Align.CENTER, Align.CENTER, Align.MIN),
+                mode=Mode.PRIVATE,
+            )
+        with Locations((0, tube_y, 6.0)):
+            dome_geom = Sphere(radius=dome_out_r, mode=Mode.PRIVATE)
+
         with URDFMetadata(
             geometry=lid,
             label=target,
@@ -961,43 +969,28 @@ class CatFountainProvider(Provider):
             parent="bowl",
             joint_type=URDFJointType.FIXED,
         ):
-            URDFBoundary(
-                lid.part,
+            with URDFBoundary.from_shape(
+                pocket_geom,
                 link_type=LinkType.LID,
                 shape=ShapeType.CYLINDER,
                 type=BoundaryType.CAVITY,
-                radius=self.settings.lid_pocket_radius * 0.001,
-                height=self.settings.lid_pocket_cavity_height * 0.001,
                 thickness=self.settings.lid_pocket_thickness * 0.001,
-                xyz=(0.0, 0.0, self.settings.lid_pocket_z_offset * 0.001),
-                rpy=(0.0, 0.0, 0.0),
-                has_intake=True,
-                intake_pos=(0.0, tube_y * 0.001, 0.00175),
-                intake_normal=(0.0, 0.0, -1.0),
-                intake_radius=platform_r * 0.001,
-                has_drain=True,
-                drain_pos=(0.0, cutout_y * 0.001, 0.0),
-                drain_normal=(0.0, 0.0, 1.0),
-                drain_radius=cutout_r * 0.001,
-                has_tube=True,
-                tube_pos=(0.0, tube_y * 0.001, 0.00175),
-                tube_normal=(0.0, 0.0, 1.0),
-                tube_radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
-                shelf_depth=self.settings.lid_pocket_thickness * 0.001,
-            )
+            ):
+                IntakePort(location=Location((0.0, tube_y, intake_z), (0, 180, 0)), radius=platform_r * 0.001)
+                DrainPort(location=Location((0.0, cutout_y, 0.0), (0, 0, 0)), radius=cutout_r * 0.001)
+                TubePort(
+                    location=Location((0.0, tube_y, intake_z), (0, 0, 0)),
+                    radius=(self.settings.tube_radius - self.settings.tube_thickness) * 0.001,
+                )
 
-            URDFBoundary(
-                lid.part,
+            with URDFBoundary.from_shape(
+                dome_geom,
                 link_type=LinkType.LID,
-                shape=ShapeType.SPHERE,
+                shape=ShapeType.CANOPY,
                 type=BoundaryType.SOLID,
-                radius=dome_out_r * 0.001,
                 thickness=(dome_out_r - dome_in_r) * 0.001,
-                xyz=(0.0, tube_y * 0.001, 6.0 * 0.001),
-                rpy=(0.0, 0.0, 0.0),
-            )
-
-        RigidJoint("mount", lid.part, Location((0, 0, step_d)))
+            ):
+                pass
 
         return lid
 
@@ -1195,28 +1188,18 @@ class CatFountainProvider(Provider):
                 parent="bowl",
                 joint_type=URDFJointType.FIXED,
             ):
-                # Side water intake port on South face (opposite the vertical tube)
-                URDFBoundary(
-                    cover,
+                with URDFBoundary.from_shape(
+                    cover.part,
                     link_type=LinkType.PUMP_COVER,
                     shape=ShapeType.CYLINDER,
                     type=BoundaryType.CAVITY,
-                    radius=casing_r * 0.001,
-                    height=cover_h * 0.001,
                     thickness=pump_well_wall * 0.001,
-                    xyz=(0.0, 0.0, 0.0),
-                    rpy=(0.0, 0.0, 0.0),
-                    has_intake=True,
-                    intake_pos=(0.0, -casing_r * 0.001, (inlet_h / 2.0) * 0.001),
-                    intake_normal=(0.0, -1.0, 0.0),
-                    intake_radius=min(inlet_w, inlet_h) * 0.5 * 0.001,
-                    has_drain=False,
-                    has_tube=False,
-                    tube_pos=(0.0, 0.0, 0.0),
-                    tube_normal=(0.0, 0.0, 1.0),
-                    tube_radius=0.0,
                     is_submerged=True,
-                )
+                ):
+                    IntakePort(
+                        location=Location((0.0, -casing_r, (inlet_h / 2.0)), (0, -90, 0)),
+                        radius=min(inlet_w, inlet_h) * 0.5 * 0.001,
+                    )
 
         RigidJoint("mount", cover.part, Location((0, 0, 0)))
         return cover

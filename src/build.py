@@ -134,7 +134,42 @@ class Builder:
 
     def _export_obj(self, shape: Shape, file_path: str, tolerance: float = 0.1, scale: float = 1.0) -> bool:
         """Export build123d shape to OBJ format."""
-        vertices, triangles = shape.tessellate(tolerance)
+        from OCP.BRepTools import BRepTools
+        from OCP.BRepMesh import BRepMesh_IncrementalMesh
+        from OCP.BRep import BRep_Tool
+        from OCP.TopLoc import TopLoc_Location
+
+        if shape.wrapped is not None:
+            BRepTools.Clean_s(shape.wrapped)
+            BRepMesh_IncrementalMesh(shape.wrapped, tolerance, False, 0.1, True)
+
+        vertices: list[Vector] = []
+        triangles: list[tuple[int, int, int]] = []
+        offset = 0
+
+        for face in shape.faces():
+            loc = TopLoc_Location()
+            poly = BRep_Tool.Triangulation_s(face.wrapped, loc)
+            if poly is None:
+                continue
+
+            trsf = loc.Transformation()
+            face_nodes = [
+                Vector(
+                    float(poly.Node(i).Transformed(trsf).X()),
+                    float(poly.Node(i).Transformed(trsf).Y()),
+                    float(poly.Node(i).Transformed(trsf).Z()),
+                )
+                for i in range(1, poly.NbNodes() + 1)
+            ]
+            vertices.extend(face_nodes)
+
+            for i in range(1, poly.NbTriangles() + 1):
+                tri = poly.Triangle(i)
+                n1, n2, n3 = tri.Get()
+                triangles.append((n1 - 1 + offset, n2 - 1 + offset, n3 - 1 + offset))
+
+            offset += poly.NbNodes()
 
         with open(file_path, "w") as f:
             f.write("# Exported by build.py\n")
@@ -184,6 +219,41 @@ class Builder:
         if shape.wrapped is not None:
             BRepTools.Clean_s(shape.wrapped)
         return export_stl(shape, file_path, tolerance=tolerance, angular_tolerance=angular_tolerance)
+
+    def _export_single_part_formats(
+        self,
+        part: Shape,
+        out_dir: str,
+        export_types: Sequence[str],
+        part_outputs: Sequence[str],
+        current_hash: str,
+        force_update: bool,
+    ) -> None:
+        """Export all requested formats (STL, OBJ) for a single part sequentially."""
+        for export_type in export_types:
+            if export_type == "obj":
+                obj_file_name = next(p for p in part_outputs if p.endswith(".obj"))
+                obj_path = Path(out_dir) / obj_file_name
+                obj_path.parent.mkdir(parents=True, exist_ok=True)
+                self._export_if_changed(
+                    obj_path,
+                    obj_file_name,
+                    current_hash,
+                    lambda p=obj_path: self._export_obj(part, str(p), scale=1.0),
+                    force_update,
+                )
+            elif export_type == "stl":
+                mesh_file_name = next(p for p in part_outputs if p.endswith(".stl"))
+                path_obj = Path(out_dir) / mesh_file_name
+                path_obj.parent.mkdir(parents=True, exist_ok=True)
+                path_str = str(path_obj)
+                self._export_if_changed(
+                    path_obj,
+                    mesh_file_name,
+                    current_hash,
+                    lambda ps=path_str: self._export_stl_cleaned(part, ps),
+                    force_update,
+                )
 
     def _export_if_changed(
         self,
@@ -249,39 +319,17 @@ class Builder:
                     current_hash = self._get_part_hash(geom.part)
                     part_outputs = self.lister.get_part_outputs(name, sub)
 
-                    for export_type in export_types:
-                        if export_type == "obj":
-                            obj_file_name = next(p for p in part_outputs if p.endswith(".obj"))
-                            obj_path = Path(out_dir) / obj_file_name
-                            obj_path.parent.mkdir(parents=True, exist_ok=True)
-
-                            # Export OBJ in standard mm scale
-                            futures.append(
-                                self.executor.submit(
-                                    self._export_if_changed,
-                                    obj_path,
-                                    obj_file_name,
-                                    current_hash,
-                                    lambda g=geom.part, p=obj_path: self._export_obj(g, str(p), scale=1.0),
-                                    force_update,
-                                )
-                            )
-
-                        elif export_type == "stl":
-                            mesh_file_name = next(p for p in part_outputs if p.endswith(".stl"))
-                            path_obj = Path(out_dir) / mesh_file_name
-                            path_obj.parent.mkdir(parents=True, exist_ok=True)
-                            path_str = str(path_obj)
-                            futures.append(
-                                self.executor.submit(
-                                    self._export_if_changed,
-                                    path_obj,
-                                    mesh_file_name,
-                                    current_hash,
-                                    lambda g=geom.part, ps=path_str: self._export_stl_cleaned(g, ps),
-                                    force_update,
-                                )
-                            )
+                    futures.append(
+                        self.executor.submit(
+                            self._export_single_part_formats,
+                            geom.part,
+                            out_dir,
+                            export_types,
+                            part_outputs,
+                            current_hash,
+                            force_update,
+                        )
+                    )
 
         # Wait for all submitted exports to complete
         for fut in futures:

@@ -26,7 +26,7 @@ SHAPE_BOX = 2
 SHAPE_PLANE = 3
 SHAPE_IMPELLER = 4
 SHAPE_TUBE = 5
-SHAPE_SPHERE = 6
+SHAPE_CANOPY = 6
 SHAPE_CASING = 7
 
 SHAPE_NAME_TO_INT: dict[ShapeType, int] = {
@@ -35,7 +35,7 @@ SHAPE_NAME_TO_INT: dict[ShapeType, int] = {
     ShapeType.PLANE: SHAPE_PLANE,
     ShapeType.IMPELLER: SHAPE_IMPELLER,
     ShapeType.TUBE: SHAPE_TUBE,
-    ShapeType.SPHERE: SHAPE_SPHERE,
+    ShapeType.CANOPY: SHAPE_CANOPY,
     ShapeType.CASING: SHAPE_CASING,
 }
 
@@ -632,11 +632,11 @@ class BoundaryProcessor:
             b_z = b_pos_list[idx][2] - base_pos[2] + max(float(b.height), float(b.radius))
             fountain_top_z = max(fountain_top_z, b_z)
 
-        has_sph = any(b.shape == ShapeType.SPHERE for b in boundary_list)
-        if has_sph:
-            sph_idx = [idx for idx, b in enumerate(boundary_list) if b.shape == ShapeType.SPHERE][0]
-            sph_top_z = b_pos_list[sph_idx][2] - base_pos[2] + float(boundary_list[sph_idx].radius) + 0.002
-            max_ceiling_z = max(fountain_top_z, sph_top_z)
+        has_canopy = any(b.shape == ShapeType.CANOPY for b in boundary_list)
+        if has_canopy:
+            canopy_idx = [idx for idx, b in enumerate(boundary_list) if b.shape == ShapeType.CANOPY][0]
+            canopy_top_z = b_pos_list[canopy_idx][2] - base_pos[2] + float(boundary_list[canopy_idx].radius) + 0.002
+            max_ceiling_z = max(fountain_top_z, canopy_top_z)
         else:
             max_ceiling_z = fountain_top_z
 

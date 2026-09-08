@@ -45,7 +45,7 @@ try:
         if cycles_addon:
             cprefs = cycles_addon.preferences
             device_types = [item[0] for item in cprefs.get_device_types(bpy.context)]
-            for dev_type in ("OPTIX", "CUDA"):
+            for dev_type in ("OPTIX", "CUDA", "METAL"):
                 if dev_type in device_types:
                     cprefs.compute_device_type = dev_type
                     cprefs.get_devices()

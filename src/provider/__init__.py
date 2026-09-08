@@ -43,7 +43,18 @@ import OCP.TopoDS  # type: ignore
 if not hasattr(OCP.TopoDS.TopoDS_Shape, "HashCode"):
     OCP.TopoDS.TopoDS_Shape.HashCode = lambda self, upper: id(self) % upper  # type: ignore
 
-from .provider import Provider, URDFMetadata, URDFBoundary
+from .provider import (
+    Provider,
+    URDFMetadata,
+    URDFBoundary,
+    IntakePort,
+    DrainPort,
+    TubePort,
+    FlowSlot,
+    SpoutDeflection,
+    ImpellerVanes,
+    MagneticCoupling,
+)
 from .types import (
     Mode,
     Section,

@@ -1227,7 +1227,7 @@ class FluidBody(BaseModel):
                         ctx.z_lid if ctx is not None and ctx.z_lid > 0.0 else z_min,
                     )
                     radius = feat.r if feat is not None and feat.r > 0.0 else radius
-                    h = max(0.002, min(0.008, z_max - pos[2]))
+                    h = max(0.0025, min(0.0080, (z_max - pos[2]) + 0.0005))
                     return generate_lid_pocket_mesh(pos=pos, radius=radius, height=h, ctx=ctx)
                 else:
                     center = (feat.x, feat.y) if feat is not None else (0.0, 0.0)
@@ -1330,10 +1330,12 @@ class FluidBody(BaseModel):
                 ry = (self.bounds_max[1] - self.bounds_min[1]) / 2.0
                 radius = feat.r if feat is not None and feat.r > 0.0 else max(0.010, (rx + ry) / 2.0)
                 center = (feat.x, feat.y) if feat is not None else (0.0, 0.0)
-                z_floor_val = (
-                    (ctx.z_lid + feat.z) / 2.0 if ctx is not None and feat is not None and feat.z > 0.0 else z_min
+                z_floor_val = feat.z if feat is not None and feat.z > 0.0 else z_min
+                z_top_val = (
+                    max(feat.z + 0.0018, min(feat.z + 0.0040, max(z_max, feat.z) + 0.0005))
+                    if feat is not None and feat.z > 0.0
+                    else z_max
                 )
-                z_top_val = min(feat.z + 0.003, max(z_max, feat.z)) if feat is not None and feat.z > 0.0 else z_max
                 return generate_heightfield_cylinder_mesh(
                     radius=radius,
                     z_floor=z_floor_val,
@@ -1398,7 +1400,7 @@ class FluidBody(BaseModel):
                         ctx.z_lid if ctx is not None and ctx.z_lid > 0.0 else z_min,
                     )
                     radius = feat.r if feat is not None and feat.r > 0.0 else radius
-                    h = max(0.002, min(0.008, z_max - pos[2]))
+                    h = max(0.0025, min(0.0080, (z_max - pos[2]) + 0.0005))
 
                     with BuildPart() as bp:
                         Cylinder(radius=radius, height=h, align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.ADD)
@@ -1477,7 +1479,7 @@ class FluidBody(BaseModel):
                     )
                     radius = feat.r if feat is not None and feat.r > 0.0 else max(0.008, (rx + ry) / 2.0)
                     h = max(
-                        0.005,
+                        0.003,
                         (feat.z if feat is not None and feat.z > 0.0 else z_max) - pos[2],
                     )
                     c = Cylinder(radius=radius, height=h, align=(Align.CENTER, Align.CENTER, Align.MIN))
@@ -1565,11 +1567,11 @@ class FluidBody(BaseModel):
                 pos = (
                     feat.x if feat is not None else 0.0,
                     feat.y if feat is not None else 0.0,
-                    (ctx.z_lid + feat.z) / 2.0 if ctx is not None and feat is not None and feat.z > 0.0 else z_min,
+                    feat.z if feat is not None and feat.z > 0.0 else z_min,
                 )
                 h = max(
                     0.002,
-                    ((feat.z + 0.003) if feat is not None and feat.z > 0.0 else z_max) - pos[2],
+                    ((feat.z + 0.0025) if feat is not None and feat.z > 0.0 else z_max) - pos[2],
                 )
                 c = Cylinder(radius=radius, height=h, align=(Align.CENTER, Align.CENTER, Align.MIN))
                 return c.locate(Location(pos))
@@ -1971,7 +1973,7 @@ class FluidBodyTracker:
             z_plat_mid = (z_lid + z_t_max) / 2.0
 
             is_top_sheet = is_terrace_zone & (pos_act[:, 2] >= z_plat_mid) & (~is_stream)
-            has_top_sheet = np.count_nonzero(is_top_sheet) >= 2
+            has_top_sheet = np.count_nonzero(is_top_sheet) >= 1
 
             # Lip waterfall: active only when top sheet is active and spilling over lip / ridge
             is_lip_wf = (
