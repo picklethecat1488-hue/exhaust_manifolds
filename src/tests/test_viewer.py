@@ -810,3 +810,75 @@ class TestViewer:
         with patch.object(sys, "argv", test_args_alias2):
             args = get_args()
             assert args.stage_window_size == 500
+
+    def test_view_cli_blender_flags(self):
+        """Verify view.py CLI parses --view-from, --save-mp4, --fps, --resolution, and --samples."""
+        import sys
+        from unittest.mock import patch
+        from view import get_args
+
+        test_args = [
+            "view.py",
+            "cat_fountain/product",
+            "--view-from",
+            "front",
+            "--save-mp4",
+            "recordings/out.mp4",
+            "--fps",
+            "60",
+            "--resolution",
+            "3840x2160",
+            "--samples",
+            "64",
+        ]
+        with patch.object(sys, "argv", test_args):
+            args = get_args()
+            assert args.view_from == "front"
+            assert args.save_mp4 == "recordings/out.mp4"
+            assert args.fps == 60
+            assert args.resolution == "3840x2160"
+            assert args.samples == 64
+
+        test_args_alias = [
+            "view.py",
+            "cat_fountain/product",
+            "--export-mp4",
+            "recordings/export.mp4",
+        ]
+        with patch.object(sys, "argv", test_args_alias):
+            args = get_args()
+            assert args.save_mp4 == "recordings/export.mp4"
+
+    @patch("provider.blender.BlenderRenderer.render_turntable_to_mp4")
+    def test_show_view_save_mp4_turntable(self, mock_render_turntable, viewer):
+        """Verify show_view triggers turntable MP4 export via Blender when save_mp4 is passed on static target."""
+        target_name = "tube/driver"
+        mock_targets = MagicMock(spec=TargetList)
+        mock_targets.__iter__.return_value = iter([target_name])
+        mock_targets.__len__.return_value = 1
+        mock_targets.subassemblies = []
+        viewer.target_parser.resolve = MagicMock(side_effect=[None, mock_targets, None])
+        viewer.manager.router.manifest = {target_name: {Section.PART: {}}}
+
+        with patch("provider.room.Compound", side_effect=lambda children: MagicMock(children=children)):
+            mock_geom = MagicMock(spec=Part, label=None)
+            mock_geom.wrapped = "fake_wrapped"
+            viewer.manager.router.run.return_value = [(target_name, mock_geom)]
+            viewer.manager.router.get_color.return_value = (1, 0, 0, 1)
+
+            viewer.show_view(
+                [target_name],
+                save_mp4="out.mp4",
+                view_from="front",
+                fps=60,
+                resolution=(2560, 1440),
+                samples=32,
+                no_gui=True,
+            )
+
+            mock_render_turntable.assert_called_once()
+            kwargs = mock_render_turntable.call_args[1]
+            assert kwargs.get("output_mp4") == "out.mp4"
+            assert kwargs.get("config").view_from == "front"
+            assert kwargs.get("config").fps == 60
+            assert kwargs.get("config").resolution == (2560, 1440)

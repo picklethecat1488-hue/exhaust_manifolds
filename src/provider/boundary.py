@@ -6,6 +6,7 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import pybullet as p
 from model.boundary_config import BoundaryConfig, BoundaryParam, ShapeType, BoundaryType, LinkType
+from model.fluid_body import CADFeature, CADFeatureType, FluidCADContext
 
 
 def _is_real_physics_client(physics_client: Any) -> bool:
@@ -397,6 +398,11 @@ class ProcessedBoundaries:
         return 0.0
 
     @property
+    def fluid_context(self) -> FluidCADContext:
+        """Construct dynamic CAD geometry boundaries context for multi-tier fluid simulation tracking."""
+        return FluidCADContext.from_processed_boundaries(self)
+
+    @property
     def tube_idx(self) -> int:
         """Find the index of the tube boundary element."""
         indices = np.where(self.b_shapes == SHAPE_TUBE)[0]
@@ -630,7 +636,7 @@ class BoundaryProcessor:
         if has_sph:
             sph_idx = [idx for idx, b in enumerate(boundary_list) if b.shape == ShapeType.SPHERE][0]
             sph_top_z = b_pos_list[sph_idx][2] - base_pos[2] + float(boundary_list[sph_idx].radius) + 0.002
-            max_ceiling_z = sph_top_z
+            max_ceiling_z = max(fountain_top_z, sph_top_z)
         else:
             max_ceiling_z = fountain_top_z
 

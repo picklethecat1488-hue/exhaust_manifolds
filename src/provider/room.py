@@ -62,6 +62,7 @@ from .utils import get_rgba_color
 
 if TYPE_CHECKING:
     from model.app_config import AppConfig
+    from model.material import MaterialsModel
 
 
 from .bullet import BulletStateTracker, _is_real_physics_client
@@ -74,11 +75,17 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
     Keys are unique names for the items, and values are tuples of (geometry, rgba_tuple).
     """
 
-    def __init__(self, config: Optional["AppConfig"] = None, is_simulate: bool = False):
-        """Initialize the room with an optional application configuration."""
+    def __init__(
+        self,
+        config: Optional["AppConfig"] = None,
+        is_simulate: bool = False,
+        materials: Optional["MaterialsModel"] = None,
+    ):
+        """Initialize the room with optional application configuration and materials model."""
         super().__init__()
         self.config = config
         self.is_simulate = is_simulate
+        self.materials = materials
         self._labels: list[tuple[str, str, Any, TextArgs]] = []
         self.gravity: tuple[float, float, float] = (0.0, 0.0, -9.81)
         self.line_weights: dict[str, float] = {}
@@ -904,6 +911,7 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
         particle_colors: Optional[list[list[float]]] = None,
         particle_radii: Optional[list[float]] = None,
         boundary_voxels: Optional[dict[str, Any]] = None,
+        water_meshes: Optional[dict[str, Any]] = None,
         step_idx: Optional[int] = None,
     ) -> None:
         """Log the given state data to Rerun."""
@@ -921,8 +929,22 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
                 ),
             )
 
-        # Log particles using vectorized numpy operations for high performance
-        if particle_positions is not None and len(particle_positions) > 0:
+        # 1. Log transparent CAD solid water meshes
+        if water_meshes is not None and len(water_meshes) > 0:
+            for name, (verts, faces) in water_meshes.items():
+                if len(verts) > 0 and len(faces) > 0:
+                    rr.log(
+                        f"world/water/{name}",
+                        rr.Mesh3D(
+                            vertex_positions=verts,
+                            triangle_indices=faces,
+                            albedo_factor=[50, 160, 240, 110],  # Transparent aquatic blue (alpha ~ 0.43)
+                        ),
+                    )
+
+        # 2. Log particles using vectorized numpy operations (gated on SHOW_WATER_VOXELS environment variable)
+        enable_water_voxels = get_env_bool("SHOW_WATER_VOXELS", False)
+        if enable_water_voxels and particle_positions is not None and len(particle_positions) > 0:
             pos_arr = np.asarray(particle_positions)
             active_mask = pos_arr[:, 2] < 100.0
             if np.any(active_mask):
@@ -994,6 +1016,11 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
         logger: Any,
         build_dir: str = "build",
         save_rrd: Optional[str] = None,
+        save_mp4: Optional[str] = None,
+        view_from: str = "iso",
+        fps: int = 60,
+        resolution: tuple[int, int] = (2560, 1440),
+        samples: int = 32,
         rerun_port: Optional[int] = None,
         spawn_viewer: bool = True,
         stage_window_size: Optional[int] = None,
@@ -1012,17 +1039,22 @@ class Room(dict[str, tuple[Any, tuple[float, float, float, float]]]):
         Provider.validate_simulate_hooks(provider_hooks)
 
         bullet_sim = Bullet(
-            self,
-            provider_hooks,
-            proj_name,
-            sim_target,
-            steps,
-            manager,
-            logger,
-            build_dir,
-            save_rrd,
-            rerun_port,
-            spawn_viewer,
+            room=self,
+            provider_hooks=provider_hooks,
+            proj_name=proj_name,
+            sim_target=sim_target,
+            steps=steps,
+            manager=manager,
+            logger=logger,
+            build_dir=build_dir,
+            save_rrd=save_rrd,
+            save_mp4=save_mp4,
+            view_from=view_from,
+            fps=fps,
+            resolution=resolution,
+            samples=samples,
+            rerun_port=rerun_port,
+            spawn_viewer=spawn_viewer,
             stage_window_size=stage_window_size,
         )
         bullet_sim.run()

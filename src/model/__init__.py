@@ -17,6 +17,15 @@ from .boundary_config import (
     Position3D,
 )
 from .fluid_config import FluidConfig
-from .fluid_body import FluidBody, FluidBodyType, FluidBodyTracker
+from .fluid_body import (
+    FluidBody,
+    FluidBodyType,
+    FluidStage,
+    FluidBodyTracker,
+    FluidCADContext,
+    CADFeature,
+    CADFeatureType,
+)
 from .coordinates import CoordinateSpace, CoordinateSystem, SpatialPose
 from .wiring import PinModel, LabelModel, FootprintModel, NetModel, Wiring
+from .material import MaterialModel, MaterialsModel

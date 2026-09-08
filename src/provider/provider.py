@@ -7,6 +7,7 @@ import math
 from contextvars import ContextVar
 from typing import Optional, Any, Callable, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
+from functools import cached_property
 from pydantic import validate_call, BaseModel
 from typing import cast
 from model.app_config import AppConfig
@@ -85,7 +86,7 @@ class ProviderOrchestrator(Orchestrator):
             # Diagrams operate on all targets at once. We pick the handler for the first target.
             handler = self.provider.diagram[targets[0]]
             # Diagrams operate on all targets at once and return content in a Room.
-            room = Room(config=self.provider.app_config)
+            room = Room(config=self.provider.app_config, materials=self.provider.materials)
             handler(room, targets, modes[0])
             results = [room]
             self.post_handler(targets, results, action)
@@ -99,7 +100,7 @@ class ProviderOrchestrator(Orchestrator):
 
             def view_task(item: tuple[str, Optional[str], Mode]) -> Room:
                 target, _, m = item
-                room = Room(config=self.provider.app_config)
+                room = Room(config=self.provider.app_config, materials=self.provider.materials)
                 setattr(room, "mode", m)
                 self.provider.view[target](room, m)
                 return room
@@ -379,6 +380,13 @@ class Provider:
 
         return str(material)
 
+    @cached_property
+    def materials(self) -> "MaterialsModel":
+        """Return strongly-typed materials model loaded from the manifest."""
+        from model import MaterialsModel
+
+        return MaterialsModel.from_manifest(self.manifest)
+
     @validate_call(config={"arbitrary_types_allowed": True})
     def get_export_types(self, target: str, subassembly: Optional[str] = None) -> list[str]:
         """Resolve the export formats for a specific target and subassembly."""
@@ -473,6 +481,7 @@ class URDFMetadata:
 
         # Initialize boundaries list with any provided boundaries
         self.boundaries: list[Any] = list(boundaries) if boundaries is not None else []
+        self._pending_boundaries: list[Any] = []
         self._token: Any = None
 
         self._apply()
@@ -481,6 +490,10 @@ class URDFMetadata:
         """Apply collected metadata properties to the geometry."""
         from typing import cast
         from .types import URDFShape
+
+        for b in self._pending_boundaries:
+            if not b._applied:
+                b._apply()
 
         target_geom = self.geometry
         if hasattr(target_geom, "part") and target_geom.part is not None:
@@ -534,6 +547,8 @@ class URDFMetadata:
 class URDFBoundary:
     """Builder utility for attaching analytical boundaries within a URDFMetadata block."""
 
+    _current: ContextVar[Optional["URDFBoundary"]] = ContextVar("current_urdf_boundary", default=None)
+
     def __init__(
         self,
         part: Any,
@@ -544,118 +559,326 @@ class URDFBoundary:
         **kwargs: Any,
     ) -> None:
         """Initialize URDFBoundary and register it to the active URDFMetadata context."""
-        from model import BoundaryConfig, ShapeType
-
-        # Get active URDFMetadata context
         metadata = URDFMetadata._current.get()
         if metadata is None:
             raise ValueError("URDFBoundary must be instantiated within a URDFMetadata context block.")
 
-        # Extract solid geometry similar to previous from_part logic
-        if hasattr(part, "part") and part.part is not None:
-            solid = part.part
-        elif hasattr(part, "solid") and callable(part.solid) and part.solid() is not None:
-            solid = part.solid()
-        elif hasattr(part, "part"):
-            solid = part.part
-        else:
-            solid = part
+        self.part = part
+        self.link_type = link_type
+        self.link_idx = link_idx
+        self.shape = shape
+        self.type = type
+        self.kwargs = dict(kwargs)
+        self.features: list[Any] = []
+        self._token: Any = None
+        self._applied = False
+        self._metadata = metadata
 
-        from provider.types import URDFShape
+        metadata._pending_boundaries.append(self)
 
-        u_solid = cast(URDFShape, solid)
+    def register_feature(self, feature: Any) -> None:
+        """Register a declarative feature to this boundary."""
+        self.features.append(feature)
 
-        solid_any: Any = solid
-        bbox = solid_any.bounding_box()
-        dx = bbox.max.X - bbox.min.X
-        dy = bbox.max.Y - bbox.min.Y
-        dz = bbox.max.Z - bbox.min.Z
+    def _apply(self) -> None:
+        """Extract CAD parameters, merge features, and validate BoundaryConfig."""
+        if self._applied:
+            return
+        from model import BoundaryConfig
+        from provider.cad_boundary import extract_boundary_from_cad
 
-        center_x = (bbox.max.X + bbox.min.X) * 0.5
-        center_y = (bbox.max.Y + bbox.min.Y) * 0.5
-        center_z = (bbox.max.Z + bbox.min.Z) * 0.5
+        metadata = self._metadata or URDFMetadata._current.get()
+        if metadata is None:
+            raise ValueError("URDFBoundary must be instantiated within a URDFMetadata context block.")
 
-        # Determine default shape from geometry if not provided
-        if shape is None:
-            if abs(dx - dy) < 1e-3:
-                shape = ShapeType.CYLINDER
-            else:
-                shape = ShapeType.BOX
+        merged_kwargs = dict(self.kwargs)
+        for feat in self.features:
+            if hasattr(feat, "apply_to_boundary"):
+                feat.apply_to_boundary(merged_kwargs)
 
-        # Compute defaults
-        default_radius = 0.0
-        default_height = 0.0
-        default_thickness = 0.0
-        default_xyz = (0.0, 0.0, 0.0)
+        boundary_friction = merged_kwargs.pop("boundary_friction", getattr(metadata, "boundary_friction", 0.20))
 
-        match shape:
-            case ShapeType.CYLINDER | ShapeType.TUBE | ShapeType.IMPELLER:
-                default_radius = float(max(dx, dy) / 2.0 * 0.001)
-                default_height = u_solid.urdf_height
-                default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(bbox.min.Z * 0.001))
-            case ShapeType.BOX:
-                default_height = u_solid.urdf_height
-                default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(bbox.min.Z * 0.001))
-            case ShapeType.SPHERE:
-                default_radius = float(max(dx, dy, dz) / 2.0 * 0.001)
-                default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(center_z * 0.001))
-            case ShapeType.PLANE:
-                default_thickness = u_solid.urdf_thickness
-                default_xyz = (float(center_x * 0.001), float(center_y * 0.001), float(bbox.min.Z * 0.001))
+        cad_candidates = extract_boundary_from_cad(
+            self.part,
+            shape=self.shape,
+            type=self.type,
+            link_type=self.link_type,
+            link_idx=self.link_idx,
+            boundary_friction=boundary_friction,
+            **merged_kwargs,
+        )
 
-        solid_location = getattr(solid, "location", None)
-        if solid_location is not None:
-            trsf = solid_location.wrapped.Transformation().VectorialPart()
-            m = [
-                [trsf.Value(1, 1), trsf.Value(1, 2), trsf.Value(1, 3)],
-                [trsf.Value(2, 1), trsf.Value(2, 2), trsf.Value(2, 3)],
-                [trsf.Value(3, 1), trsf.Value(3, 2), trsf.Value(3, 3)],
-            ]
-            sin_theta = -m[2][0]
-            sin_theta = max(-1.0, min(1.0, sin_theta))
-            theta = math.asin(sin_theta)
-            if abs(math.cos(theta)) > 1e-6:
-                phi = math.atan2(m[2][1], m[2][2])
-                psi = math.atan2(m[1][0], m[0][0])
-            else:
-                phi = math.atan2(-m[1][2], m[1][1])
-                psi = 0.0
-            default_rpy = (float(phi), float(theta), float(psi))
-        else:
-            default_rpy = (0.0, 0.0, 0.0)
-
-        radius = kwargs.pop("radius", default_radius)
-        height = kwargs.pop("height", default_height)
-        thickness = kwargs.pop("thickness", default_thickness)
-        xyz = kwargs.pop("xyz", default_xyz)
-        rpy = kwargs.pop("rpy", default_rpy)
-        boundary_friction = kwargs.pop("boundary_friction", getattr(metadata, "boundary_friction", 0.20))
-
-        supported_fields = BoundaryConfig.SHAPE_SUPPORTED_FIELDS.get(shape, set())
+        resolved_shape = cad_candidates.get("shape")
+        supported_fields = BoundaryConfig.SHAPE_SUPPORTED_FIELDS.get(resolved_shape, set())
         common_fields = {"link_type", "link_idx", "shape", "type", "xyz", "rpy", "boundary_friction"}
 
-        candidates = {
-            "link_type": link_type,
-            "link_idx": link_idx,
-            "shape": shape,
-            "type": type,
-            "radius": radius,
-            "height": height,
-            "thickness": thickness,
-            "xyz": xyz,
-            "rpy": rpy,
-            "boundary_friction": boundary_friction,
-            **kwargs,
-        }
-        config_dict = {k: v for k, v in candidates.items() if k in supported_fields or k in common_fields}
+        config_dict = {k: v for k, v in cad_candidates.items() if k in supported_fields or k in common_fields}
         boundary = BoundaryConfig.model_validate(config_dict)
-        # Append to active metadata's boundaries list
         metadata.boundaries.append(boundary)
+        self._applied = True
+
+    @classmethod
+    def from_shape(
+        cls,
+        shape_geom: Any,
+        link_type: Any,
+        link_idx: int = -1,
+        shape: Optional[Any] = None,
+        type: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> "URDFBoundary":
+        """Construct and register a URDFBoundary directly from a build123d shape or feature solid."""
+        return cls(
+            part=shape_geom,
+            link_type=link_type,
+            link_idx=link_idx,
+            shape=shape,
+            type=type,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_part(
+        cls,
+        part: Any,
+        link_type: Any,
+        link_idx: int = -1,
+        shape: Optional[Any] = None,
+        type: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> "URDFBoundary":
+        """Construct and register a URDFBoundary from a CAD part with attached joint ports."""
+        return cls(
+            part=part,
+            link_type=link_type,
+            link_idx=link_idx,
+            shape=shape,
+            type=type,
+            **kwargs,
+        )
 
     def __enter__(self) -> "URDFBoundary":
         """Enter context manager."""
+        self._token = self._current.set(self)
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Exit context manager."""
-        pass
+        if self._token is not None:
+            self._current.reset(self._token)
+        self._apply()
+
+
+def _extract_pos_norm_from_location(
+    loc: Any,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Extract position (m) and normal vector from a build123d Location."""
+    pos_m = (
+        float(loc.position.X * 0.001),
+        float(loc.position.Y * 0.001),
+        float(loc.position.Z * 0.001),
+    )
+    trsf = loc.wrapped.Transformation().VectorialPart()
+    norm_m = (
+        float(trsf.Value(1, 3)),
+        float(trsf.Value(2, 3)),
+        float(trsf.Value(3, 3)),
+    )
+    return pos_m, norm_m
+
+
+class IntakePort:
+    """Declarative fluid intake port for a URDFBoundary."""
+
+    def __init__(
+        self,
+        location: Optional[Any] = None,
+        pos: Optional[tuple[float, float, float]] = None,
+        normal: Optional[tuple[float, float, float]] = None,
+        radius: Optional[float] = None,
+    ) -> None:
+        """Initialize an IntakePort with CAD location or explicit coordinates."""
+        if location is not None:
+            self.pos, self.normal = _extract_pos_norm_from_location(location)
+        else:
+            self.pos = pos or (0.0, 0.0, 0.0)
+            self.normal = normal or (0.0, 0.0, 1.0)
+        self.radius = float(radius) if radius is not None else 0.0
+
+        boundary = URDFBoundary._current.get()
+        if boundary is not None:
+            boundary.register_feature(self)
+
+    def apply_to_boundary(self, kwargs: dict[str, Any]) -> None:
+        """Apply intake port attributes to the boundary kwargs."""
+        kwargs["has_intake"] = True
+        kwargs["intake_pos"] = self.pos
+        kwargs["intake_normal"] = self.normal
+        if self.radius > 0.0:
+            kwargs["intake_radius"] = self.radius
+
+
+class DrainPort:
+    """Declarative fluid drain port for a URDFBoundary."""
+
+    def __init__(
+        self,
+        location: Optional[Any] = None,
+        pos: Optional[tuple[float, float, float]] = None,
+        normal: Optional[tuple[float, float, float]] = None,
+        radius: Optional[float] = None,
+    ) -> None:
+        """Initialize a DrainPort with CAD location or explicit coordinates."""
+        if location is not None:
+            self.pos, self.normal = _extract_pos_norm_from_location(location)
+        else:
+            self.pos = pos or (0.0, 0.0, 0.0)
+            self.normal = normal or (0.0, 0.0, 1.0)
+        self.radius = float(radius) if radius is not None else 0.0
+
+        boundary = URDFBoundary._current.get()
+        if boundary is not None:
+            boundary.register_feature(self)
+
+    def apply_to_boundary(self, kwargs: dict[str, Any]) -> None:
+        """Apply drain port attributes to the boundary kwargs."""
+        kwargs["has_drain"] = True
+        kwargs["drain_pos"] = self.pos
+        kwargs["drain_normal"] = self.normal
+        if self.radius > 0.0:
+            kwargs["drain_radius"] = self.radius
+
+
+class TubePort:
+    """Declarative delivery tube port for a URDFBoundary."""
+
+    def __init__(
+        self,
+        location: Optional[Any] = None,
+        pos: Optional[tuple[float, float, float]] = None,
+        normal: Optional[tuple[float, float, float]] = None,
+        radius: Optional[float] = None,
+    ) -> None:
+        """Initialize a TubePort with CAD location or explicit coordinates."""
+        if location is not None:
+            self.pos, self.normal = _extract_pos_norm_from_location(location)
+        else:
+            self.pos = pos or (0.0, 0.0, 0.0)
+            self.normal = normal or (0.0, 0.0, 1.0)
+        self.radius = float(radius) if radius is not None else 0.0
+
+        boundary = URDFBoundary._current.get()
+        if boundary is not None:
+            boundary.register_feature(self)
+
+    def apply_to_boundary(self, kwargs: dict[str, Any]) -> None:
+        """Apply tube port attributes to the boundary kwargs."""
+        kwargs["has_tube"] = True
+        kwargs["tube_pos"] = self.pos
+        kwargs["tube_normal"] = self.normal
+        if self.radius > 0.0:
+            kwargs["tube_radius"] = self.radius
+
+
+class FlowSlot:
+    """Declarative discharge slot opening for casing and tube boundaries."""
+
+    def __init__(
+        self,
+        height: float,
+        width: float,
+        cutoff_y: float = 0.0,
+        ceiling_thickness: float = 0.0,
+    ) -> None:
+        """Initialize a FlowSlot with physical opening dimensions."""
+        self.height = float(height)
+        self.width = float(width)
+        self.cutoff_y = float(cutoff_y)
+        self.ceiling_thickness = float(ceiling_thickness)
+
+        boundary = URDFBoundary._current.get()
+        if boundary is not None:
+            boundary.register_feature(self)
+
+    def apply_to_boundary(self, kwargs: dict[str, Any]) -> None:
+        """Apply flow slot attributes to the boundary kwargs."""
+        kwargs["slot_height"] = self.height
+        kwargs["slot_width"] = self.width
+        kwargs["cutoff_y"] = self.cutoff_y
+        kwargs["ceiling_thickness"] = self.ceiling_thickness
+
+
+class SpoutDeflection:
+    """Declarative spout deflection geometry for tube boundaries."""
+
+    def __init__(self, radius: float, height: float) -> None:
+        """Initialize a SpoutDeflection canopy."""
+        self.radius = float(radius)
+        self.height = float(height)
+
+        boundary = URDFBoundary._current.get()
+        if boundary is not None:
+            boundary.register_feature(self)
+
+    def apply_to_boundary(self, kwargs: dict[str, Any]) -> None:
+        """Apply spout deflection attributes to the boundary kwargs."""
+        kwargs["spout_radius"] = self.radius
+        kwargs["spout_height"] = self.height
+
+
+class ImpellerVanes:
+    """Declarative impeller vane geometry for impeller boundaries."""
+
+    def __init__(
+        self,
+        count: int,
+        twist: float,
+        thickness: float,
+    ) -> None:
+        """Initialize ImpellerVanes with count, twist angle, and vane thickness."""
+        self.count = int(count)
+        self.twist = float(twist)
+        self.thickness = float(thickness)
+
+        boundary = URDFBoundary._current.get()
+        if boundary is not None:
+            boundary.register_feature(self)
+
+    def apply_to_boundary(self, kwargs: dict[str, Any]) -> None:
+        """Apply impeller vane attributes to the boundary kwargs."""
+        kwargs["num_vanes"] = self.count
+        kwargs["vane_twist"] = self.twist
+        kwargs["vane_thickness"] = self.thickness
+
+
+class MagneticCoupling:
+    """Declarative magnetic coupling parameters for impeller boundaries."""
+
+    def __init__(
+        self,
+        radius: float,
+        thickness: float,
+        count: int,
+        well_wall: Optional[float] = None,
+        shaft_radius: Optional[float] = None,
+    ) -> None:
+        """Initialize MagneticCoupling with magnet pocket geometry."""
+        self.radius = float(radius)
+        self.thickness = float(thickness)
+        self.count = int(count)
+        self.well_wall = float(well_wall) if well_wall is not None else None
+        self.shaft_radius = float(shaft_radius) if shaft_radius is not None else None
+
+        boundary = URDFBoundary._current.get()
+        if boundary is not None:
+            boundary.register_feature(self)
+
+    def apply_to_boundary(self, kwargs: dict[str, Any]) -> None:
+        """Apply magnetic coupling attributes to the boundary kwargs."""
+        kwargs["magnet_radius"] = self.radius
+        kwargs["magnet_thickness"] = self.thickness
+        kwargs["magnet_count"] = self.count
+        if self.well_wall is not None:
+            kwargs["pump_well_wall"] = self.well_wall
+        if self.shaft_radius is not None:
+            kwargs["impeller_shaft_radius"] = self.shaft_radius
